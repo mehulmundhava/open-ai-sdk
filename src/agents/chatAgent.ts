@@ -76,6 +76,16 @@ JOIN user_device_assignment uda ON uda.device = dg.device_id
 LEFT JOIN facilities f ON dg.facility_id = f.facility_id
 WHERE uda.user_id = '${userId}' [filters]
 ORDER BY dg.entry_event_time ASC
+
+CRITICAL: device_geofencings table does NOT have latitude/longitude fields. For geographic filtering on journeys:
+- You MUST JOIN facilities table: LEFT JOIN facilities f ON f.facility_id = dg.facility_id
+- Use facilities.latitude and facilities.longitude (NOT device_geofencings - these columns don't exist)
+- For geographic ST_Contains filter, use: ST_MakePoint(f.longitude, f.latitude)
+- Example with geographic filter:
+  WHERE ST_Contains(
+      ST_GeomFromText('POLYGON((-118.4 14.5, -86.8 14.5, -86.8 32.7, -118.4 32.7, -118.4 14.5))', 4326),
+      ST_SetSRID(ST_MakePoint(f.longitude, f.latitude), 4326)
+  )
 `;
   }
 
@@ -92,16 +102,34 @@ RULES:
 - When errors occur, provide user-friendly explanations WITHOUT mentioning technical details like table names, column names, SQL syntax, or database structure
 - If a query fails, explain what went wrong in simple terms (e.g., "The requested information is not available" instead of "column X does not exist in table Y")
 - When using list_query tool: The SQL query MUST NOT include LIMIT clause - the tool will return all matching rows and generate CSV automatically
-- For geographic queries (finding devices/assets in areas like cities, states, countries): ALWAYS use ST_GeomFromText with POLYGON coordinates. Use device_current_data table with longitude and latitude columns. Join with user_device_assignment for user_id filtering. Example pattern:
-  SELECT cd.device_id, cd.latitude, cd.longitude
-  FROM device_current_data cd
-  JOIN user_device_assignment ud ON ud.device = cd.device_id
-  WHERE ST_Contains(
-      ST_GeomFromText('POLYGON((...coordinates...))', 4326),
-      ST_SetSRID(ST_MakePoint(cd.longitude, cd.latitude), 4326)
-  )
-  AND ud.user_id = 'USER_ID';
-  DO NOT use tables like us_state_outlines - they don't exist. Use POLYGON definitions directly.
+- For geographic queries (finding devices/assets in areas like cities, states, countries): ALWAYS use ST_GeomFromText with POLYGON coordinates. You MUST replace placeholders with actual coordinates. Use device_current_data table with longitude and latitude columns. Join with user_device_assignment for user_id filtering.
+- For journey/shipment queries with geographic filters, include useful fields: device_id, device_name, facility_id, facility_name, facility_type, temperature, battery, entry_event_time, exit_event_time, latitude, longitude.
+- Geographic coordinate examples:
+  * Mexico bounding box: POLYGON((-118.4 14.5, -86.8 14.5, -86.8 32.7, -118.4 32.7, -118.4 14.5))
+  * United States bounding box: POLYGON((-124.848974 49.384358, -66.93457 49.384358, -66.93457 24.396308, -124.848974 24.396308, -124.848974 49.384358))
+  * India bounding box: POLYGON((66.782749 8.047059, 97.402624 8.047059, 97.402624 37.090353, 66.782749 37.090353, 66.782749 8.047059))
+  * New York approximate: POLYGON((-74.25909 40.917577, -73.950000 40.800000, -73.700272 40.477399, -74.25909 40.477399, -74.25909 40.917577))
+- Example for journey queries with geographic filter and useful fields:
+  SELECT dg.device_id, d.device_name, dg.facility_id, f.facility_name, dg.facility_type, 
+        dg.entry_event_time, dg.exit_event_time,
+         f.latitude, f.longitude,f.facility_name,dg.facility_type,
+  FROM device_geofencings dg
+  JOIN user_device_assignment uda ON uda.device = dg.device_id
+  JOIN device_details_table d ON d.device_id = dg.device_id
+  LEFT JOIN facilities f ON f.facility_id = dg.facility_id
+  WHERE uda.user_id = 'USER_ID'
+    AND dg.entry_event_time >= NOW() - INTERVAL '1 day'
+    AND ST_Contains(
+        ST_GeomFromText('POLYGON((-118.4 14.5, -86.8 14.5, -86.8 32.7, -118.4 32.7, -118.4 14.5))', 4326),
+        ST_SetSRID(ST_MakePoint(f.longitude, f.latitude), 4326)
+    )
+  ORDER BY dg.entry_event_time ASC;
+- CRITICAL FOR JOURNEY QUERIES: device_geofencings table does NOT have latitude/longitude columns. For geographic filtering on journeys:
+  * You MUST JOIN facilities table: LEFT JOIN facilities f ON f.facility_id = dg.facility_id
+  * Use facilities.latitude and facilities.longitude (NOT device_geofencings.latitude/longitude - they don't exist)
+  * For geographic ST_Contains filter, use: ST_MakePoint(f.longitude, f.latitude)
+- CRITICAL: NEVER use placeholder text like "...coordinates..." or "...coordinates for Mexico...". ALWAYS use actual numeric coordinates in the POLYGON definition.
+- DO NOT use tables like us_state_outlines - they don't exist. Use POLYGON definitions directly with actual coordinates.
 `.trim();
 
   // Add user/admin specific instructions
