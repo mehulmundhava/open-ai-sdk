@@ -5,9 +5,14 @@ import * as fs from 'fs';
 
 const router = Router();
 
-router.get('/download-csv/:csvId', async (req: Request, res: Response): Promise<void> => {
+// UUID v4 pattern (8-4-4-4-12 hex). Mounted at /download-csv so full path is GET /download-csv/:csvId
+const UUID_REGEX = /^([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})/i;
+
+router.get('/:csvId', async (req: Request, res: Response): Promise<void> => {
   try {
-    const { csvId } = req.params;
+    let { csvId } = req.params;
+
+    logger.info(`CSV download requested for ID: ${csvId}`);
 
     if (!csvId) {
       res.status(400).json({
@@ -16,18 +21,28 @@ router.get('/download-csv/:csvId', async (req: Request, res: Response): Promise<
       return;
     }
 
+    // Sanitize: strip trailing non-UUID chars (e.g. ")" from markdown link [text](url))
+    const match = csvId.match(UUID_REGEX);
+    if (match) {
+      csvId = match[1];
+    }
+
     const csvFilePath = getCSVById(csvId);
 
     if (!csvFilePath || !fs.existsSync(csvFilePath)) {
+      logger.warn(`CSV not found for ID: ${csvId}`);
       res.status(404).json({
-        error: 'CSV file not found',
+        error: `CSV file with ID '${csvId}' not found. It may have expired or been deleted.`,
       });
       return;
     }
 
-    // Set headers for CSV download
-    res.setHeader('Content-Type', 'text/csv');
-    res.setHeader('Content-Disposition', `attachment; filename="${csvId}.csv"`);
+    // Set headers for CSV download (match Python: query_results_{csv_id}.csv, text/csv; charset=utf-8)
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename=query_results_${csvId}.csv`);
+
+    const fileSize = fs.statSync(csvFilePath).size;
+    logger.info(`CSV retrieved successfully for ID: ${csvId}, size: ${fileSize} bytes`);
 
     logger.info('📤 CSV Download API Response:', {
       method: req.method,

@@ -6,6 +6,26 @@ import { TokenTracker } from '../utils/tokenTracker';
 import { logger, createRequestLogger } from '../utils/logger';
 import { v4 as uuidv4 } from 'uuid';
 
+/** Strip localhost or any origin from download-csv URLs so response never exposes API base URL. */
+function stripLocalhostFromCsvLinks(text: string): string {
+  if (!text || !text.includes('download-csv')) return text;
+  const before = text;
+  // Literal first (most reliable): replace exact localhost URL with relative path
+  let out = text.split('http://localhost:3009/download-csv/').join('/download-csv/');
+  out = out.split('https://localhost:3009/download-csv/').join('/download-csv/');
+  out = out.replace(/https?:\/\/[^/]*\/download-csv\//g, '/download-csv/');
+  out = out.replace(/sandbox:\/download-csv\//g, '/download-csv/');
+  const changed = out !== before;
+  if (changed || before.includes('localhost')) {
+    logger.info('🔗 [Controller] stripLocalhostFromCsvLinks', {
+      hadLocalhost: before.includes('localhost'),
+      changed,
+      stillHasLocalhost: out.includes('localhost'),
+    });
+  }
+  return out;
+}
+
 /**
  * Process chat request and return response
  */
@@ -126,16 +146,47 @@ export async function processChat(
     );
     const journeyToolSql = journeyToolCall?.input?.sql;
 
-    // Build response
+    // Build answer and results to match Python response structure
+    let answer = result.answer;
+    let rawResult: string | undefined;
+
+    if (result.queryResult) {
+      // Python: results.raw_result = "Total rows: N\nCSV Download Link: /download-csv/{uuid}"
+      if (result.csvId && result.queryResult.includes('Total rows:') && result.queryResult.includes('CSV Download Link:')) {
+        const match = result.queryResult.match(/Total rows:\s*(\d+)/);
+        const rowCount = match ? match[1] : '';
+        rawResult = `Total rows: ${rowCount}\nCSV Download Link: /download-csv/${result.csvId}`;
+      } else {
+        rawResult = result.queryResult;
+      }
+    }
+
+    // Python: answer = short summary + "\n[Download CSV](/download-csv/{uuid})"
+    if (result.csvId && result.csvDownloadPath) {
+      const firstSentenceMatch = result.answer.match(/^[^.]*\./);
+      const firstSentence = (firstSentenceMatch ? firstSentenceMatch[0] : result.answer.split(/\n/)[0] || result.answer).trim();
+      const summary = firstSentence.endsWith('.') ? firstSentence : firstSentence + '.';
+      answer = `${summary}\n[Download CSV](${result.csvDownloadPath})`;
+    }
+
+    // Final safety: strip any localhost/absolute URL from download-csv links so response never exposes it
+    requestLogger.info('🔗 [Controller] BEFORE stripLocalhostFromCsvLinks', {
+      answerHasLocalhost: answer.includes('localhost'),
+      answerSnippet: answer.includes('download-csv') ? answer.substring(Math.max(0, answer.indexOf('download-csv') - 20), answer.indexOf('download-csv') + 60) : 'n/a',
+    });
+    answer = stripLocalhostFromCsvLinks(answer);
+    const conversationAnswer = stripLocalhostFromCsvLinks(result.answer);
+    requestLogger.info('🔗 [Controller] AFTER stripLocalhostFromCsvLinks', {
+      answerStillHasLocalhost: answer.includes('localhost'),
+      answerSnippet: answer.includes('download-csv') ? answer.substring(Math.max(0, answer.indexOf('download-csv') - 10), answer.indexOf('download-csv') + 50) : 'n/a',
+    });
+
+    // Build response (Python structure: token_id, answer, sql_query, results)
     const response: ChatResponse = {
       token_id: payload.token_id,
-      answer: result.answer,
-      sql_query: result.sqlQuery, // Ensure SQL query is always included
-      results: result.queryResult ? { raw: result.queryResult } : undefined,
-      llm_used: true,
-      llm_type: 'OPENAI/gpt-4o',
-      csv_id: result.csvId,
-      csv_download_path: result.csvDownloadPath,
+      answer,
+      sql_query: result.sqlQuery,
+      results: rawResult !== undefined ? { raw_result: rawResult } : undefined,
       debug: {
         request_id: requestId,
         elapsed_time_ms: elapsedTime,
@@ -150,7 +201,7 @@ export async function processChat(
         query_result: result.queryResult,
         conversation: {
           question: payload.question,
-          answer: result.answer,
+          answer: conversationAnswer,
           chat_history: payload.chat_history,
         },
       },

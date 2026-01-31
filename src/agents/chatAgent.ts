@@ -130,6 +130,7 @@ RULES:
   * For geographic ST_Contains filter, use: ST_MakePoint(f.longitude, f.latitude)
 - CRITICAL: NEVER use placeholder text like "...coordinates..." or "...coordinates for Mexico...". ALWAYS use actual numeric coordinates in the POLYGON definition.
 - DO NOT use tables like us_state_outlines - they don't exist. Use POLYGON definitions directly with actual coordinates.
+- SHOCK / FREE-FALL LIST: For "list of devices that experienced shock (or free-fall) after [date]" or "who experienced shock and when": use device_current_data (cd) ONLY. Do NOT join shock_info. device_current_data has shock_event_time and free_fall_event_time (latest per device). Example: SELECT cd.device_id, cd.device_name, cd.shock_event_time FROM device_current_data cd JOIN user_device_assignment ud ON ud.device = cd.device_id WHERE ud.user_id = USER_ID AND cd.shock_event_time >= 'DATE'::date ORDER BY cd.shock_event_time. For free-fall use cd.free_fall_event_time. Joining shock_info scans full history and will timeout.
 `.trim();
 
   // Add user/admin specific instructions

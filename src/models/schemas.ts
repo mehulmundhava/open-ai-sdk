@@ -23,6 +23,8 @@ export interface ChatResponse {
   debug?: Record<string, any>;
   csv_id?: string;
   csv_download_path?: string;
+  /** Full URL for CSV download (API_BASE_URL + path). Use this as link href so download hits the server. */
+  csv_download_url?: string;
   security_failure_reason?: string;
   security_blocked?: boolean;
   error?: string;

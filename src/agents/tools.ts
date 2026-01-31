@@ -127,7 +127,7 @@ Use this tool AFTER you have:
         // If > 3 rows, format with CSV (returns count, preview, and CSV link)
         if (rowCount > 3) {
           logger.info(`   Large result detected (${rowCount} rows), generating CSV...`);
-          const formattedResult = formatResultWithCSV(result.formatted, 3);
+          const formattedResult = await formatResultWithCSV(result.formatted, 3);
           logger.info('   Formatted result with CSV link and count');
           return formattedResult;
         } else {
@@ -142,7 +142,7 @@ Use this tool AFTER you have:
         // If > 3 rows, format with CSV (same logic as LIST queries)
         if (rowCount > 3) {
           logger.info(`   Large result detected (${rowCount} rows), generating CSV...`);
-          const formattedResult = formatResultWithCSV(result.formatted, 3);
+          const formattedResult = await formatResultWithCSV(result.formatted, 3);
           logger.info('   Formatted result with CSV link and count');
           return formattedResult;
         } else {
@@ -275,7 +275,7 @@ The query should return ALL matching rows - do not add LIMIT to the SQL query.`,
       // Always format with CSV if > 3 rows (returns count, preview, and CSV link)
       if (rowCount > 3) {
         logger.info(`   Large result detected (${rowCount} rows), generating CSV...`);
-        const formattedResult = formatResultWithCSV(result.formatted, 3);
+        const formattedResult = await formatResultWithCSV(result.formatted, 3);
         logger.info('   Formatted result with CSV link and count');
         return formattedResult;
       } else {
@@ -546,7 +546,7 @@ This tool:
       // Format result with CSV if > 3 journeys
       if (journeyCount > 3) {
         logger.info(`   📊 Large result detected (${journeyCount} journeys), generating CSV...`);
-        const resultJson = formatJourneyListWithCSV(journeyResult, 3);
+        const resultJson = await formatJourneyListWithCSV(journeyResult, 3);
         logger.info(`   ✅ Showing first 3 journeys, CSV available for all ${journeyCount} journeys`);
         return resultJson;
       } else {
