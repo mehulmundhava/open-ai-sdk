@@ -129,7 +129,7 @@ USER MODE: The user_id for this request is: ${userId}. Do NOT ask the user for t
   // Pre-load examples from vector store
   if (question) {
     try {
-      const exampleDocs = await vectorStore.searchExamples(question, 5);
+      const exampleDocs = await vectorStore.searchExamples(question, 10);
       const extraPrompts = await vectorStore.searchExtraPrompts(question, 1);
 
       if (exampleDocs.length > 0) {

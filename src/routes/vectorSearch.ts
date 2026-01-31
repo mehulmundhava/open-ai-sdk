@@ -13,7 +13,7 @@ declare global {
   }
 }
 
-router.post('/vector-search', async (req: Request, res: Response) => {
+router.post('/', async (req: Request, res: Response) => {
   try {
     const payload: VectorSearchRequest = req.body;
 
