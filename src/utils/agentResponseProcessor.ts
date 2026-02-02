@@ -67,14 +67,17 @@ export class AgentResponseProcessor {
       answer
     );
 
+    // Fix CSV download links: LLM sometimes outputs sandbox:/download-csv/... (invalid); replace with full API URL
+    const fixedAnswer = this.fixCsvDownloadLinksInAnswer(answer);
+
     // Extract tool errors
     const toolErrors = this.extractToolErrors(toolCalls);
 
     // Log comprehensive summary
-    this.logSummary(answer, sqlQuery, toolCalls, queryResult);
+    this.logSummary(fixedAnswer, sqlQuery, toolCalls, queryResult);
 
     return {
-      answer,
+      answer: fixedAnswer,
       sqlQuery,
       queryResult,
       csvId,
@@ -674,6 +677,46 @@ export class AgentResponseProcessor {
   }
 
   /**
+   * Replace any download-csv link (sandbox:, http://localhost:3009, or full URL) with relative path
+   * so the response never exposes localhost/API URL: [Download CSV](/download-csv/{uuid}).
+   * Frontend/Laravel use {baseURL}/ai/ai-chat/download-csv/{uuid} for same-origin download.
+   */
+  private fixCsvDownloadLinksInAnswer(answer: string): string {
+    if (!answer || !answer.includes('download-csv')) return answer;
+
+    const before = answer;
+    const hadLocalhost = before.includes('localhost');
+    logger.info('🔗 [Processor] fixCsvDownloadLinksInAnswer ENTRY', {
+      answerLength: before.length,
+      hasDownloadCsv: true,
+      hadLocalhost,
+      snippet: before.includes('download-csv') ? before.substring(Math.max(0, before.indexOf('download-csv') - 30), before.indexOf('download-csv') + 70) : 'n/a',
+    });
+
+    let fixed = answer;
+
+    // 1) Markdown links: [text](http://localhost:3009/download-csv/uuid) -> [Download CSV](/download-csv/uuid)
+    const markdownLinkPattern = /\[([^\]]*)\]\((?:sandbox:|https?:\/\/[^/]*)?\/download-csv\/([a-f0-9-]+)\)/gi;
+    fixed = fixed.replace(markdownLinkPattern, '[Download CSV](/download-csv/$2)');
+
+    // 2) Safety net: strip any remaining localhost (or any origin) from download-csv URLs in the string
+    fixed = fixed.replace(/https?:\/\/[^/]*\/download-csv\//g, '/download-csv/');
+    fixed = fixed.replace(/sandbox:\/download-csv\//g, '/download-csv/');
+
+    // 3) Literal fallback so we never leave localhost
+    fixed = fixed.split('http://localhost:3009/download-csv/').join('/download-csv/');
+    fixed = fixed.split('https://localhost:3009/download-csv/').join('/download-csv/');
+
+    const stillHasLocalhost = fixed.includes('localhost');
+    logger.info('🔗 [Processor] fixCsvDownloadLinksInAnswer EXIT', {
+      changed: fixed !== before,
+      stillHasLocalhost,
+      afterSnippet: fixed.includes('download-csv') ? fixed.substring(Math.max(0, fixed.indexOf('download-csv') - 20), fixed.indexOf('download-csv') + 60) : 'n/a',
+    });
+    return fixed;
+  }
+
+  /**
    * Sanitize answer to remove technical database details
    */
   private sanitizeAnswer(answer: string): string {
@@ -761,6 +804,21 @@ export class AgentResponseProcessor {
   }
 
   /**
+   * Normalize tool input: SDK may pass input as JSON string (e.g. "{\"query\":\"SELECT ...\"}").
+   */
+  private normalizeToolInput(input: any): { query?: string; sql?: string; [k: string]: any } | undefined {
+    if (input == null) return undefined;
+    if (typeof input === 'object' && (input.query != null || input.sql != null)) return input;
+    if (typeof input !== 'string') return input;
+    try {
+      const parsed = JSON.parse(input);
+      return parsed && typeof parsed === 'object' ? parsed : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
    * Extract SQL query and results from tool calls and answer
    */
   private async extractQueryInfo(
@@ -777,36 +835,41 @@ export class AgentResponseProcessor {
     let csvId: string | undefined;
     let csvDownloadPath: string | undefined;
 
-    // Extract from tool calls
+    // Extract from tool calls (do not break: sql query comes from one tool, result/CSV ID from another)
     for (const toolCall of toolCalls) {
+      const input = this.normalizeToolInput(toolCall.input);
       // Handle regular SQL tools
       if (
         (toolCall.tool === 'execute_db_query' ||
           toolCall.tool === 'count_query' ||
           toolCall.tool === 'list_query') &&
-        toolCall.input?.query
+        input?.query
       ) {
-        sqlQuery = toolCall.input.query;
-        queryResult =
+        if (!sqlQuery) sqlQuery = input.query;
+        // Prefer result from a tool that actually has output (e.g. second list_query with CSV ID)
+        const out =
           typeof toolCall.output === 'string'
             ? toolCall.output
-            : JSON.stringify(toolCall.output);
-        break;
+            : toolCall.output != null
+              ? (typeof (toolCall.output as any).text === 'string'
+                  ? (toolCall.output as any).text
+                  : JSON.stringify(toolCall.output))
+              : undefined;
+        if (out !== undefined && out !== '') queryResult = out;
       }
       // Handle journey tools (they use 'sql' parameter)
       if (
         (toolCall.tool === 'journey_list_tool' || toolCall.tool === 'journey_count_tool') &&
-        toolCall.input?.sql
+        input?.sql
       ) {
-        sqlQuery = toolCall.input.sql;
-        queryResult =
+        if (!sqlQuery) sqlQuery = input.sql;
+        const out =
           typeof toolCall.output === 'string'
             ? toolCall.output
-            : JSON.stringify(toolCall.output);
-        // Don't break - continue to check for other tools, but journey tools take priority for SQL
-        if (!sqlQuery) {
-          sqlQuery = toolCall.input.sql;
-        }
+            : toolCall.output != null
+              ? JSON.stringify(toolCall.output)
+              : undefined;
+        if (out !== undefined && out !== '') queryResult = out;
       }
     }
 
@@ -818,6 +881,14 @@ export class AgentResponseProcessor {
     // Extract CSV info from answer
     if (answer.includes('CSV Download Link:')) {
       const csvMatch = answer.match(/CSV ID: ([^\s]+)/);
+      if (csvMatch) {
+        csvId = csvMatch[1];
+        csvDownloadPath = `/download-csv/${csvId}`;
+      }
+    }
+    // Also extract from tool output so API returns csv_id even if LLM didn't repeat it (enables download link)
+    if (!csvId && queryResult && (queryResult.includes('CSV Download Link:') || queryResult.includes('CSV ID:'))) {
+      const csvMatch = queryResult.match(/CSV ID: ([^\s]+)/);
       if (csvMatch) {
         csvId = csvMatch[1];
         csvDownloadPath = `/download-csv/${csvId}`;

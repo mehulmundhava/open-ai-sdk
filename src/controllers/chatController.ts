@@ -6,6 +6,26 @@ import { TokenTracker } from '../utils/tokenTracker';
 import { logger, createRequestLogger } from '../utils/logger';
 import { v4 as uuidv4 } from 'uuid';
 
+/** Strip localhost or any origin from download-csv URLs so response never exposes API base URL. */
+function stripLocalhostFromCsvLinks(text: string): string {
+  if (!text || !text.includes('download-csv')) return text;
+  const before = text;
+  // Literal first (most reliable): replace exact localhost URL with relative path
+  let out = text.split('http://localhost:3009/download-csv/').join('/download-csv/');
+  out = out.split('https://localhost:3009/download-csv/').join('/download-csv/');
+  out = out.replace(/https?:\/\/[^/]*\/download-csv\//g, '/download-csv/');
+  out = out.replace(/sandbox:\/download-csv\//g, '/download-csv/');
+  const changed = out !== before;
+  if (changed || before.includes('localhost')) {
+    logger.info('🔗 [Controller] stripLocalhostFromCsvLinks', {
+      hadLocalhost: before.includes('localhost'),
+      changed,
+      stillHasLocalhost: out.includes('localhost'),
+    });
+  }
+  return out;
+}
+
 /**
  * Process chat request and return response
  */
@@ -147,13 +167,9 @@ export async function processChat(
     // Build response
     const response: ChatResponse = {
       token_id: payload.token_id,
-      answer: result.answer,
-      sql_query: result.sqlQuery, // Ensure SQL query is always included
-      results: result.queryResult ? { raw: result.queryResult } : undefined,
-      llm_used: true,
-      llm_type: 'OPENAI/gpt-4o',
-      csv_id: result.csvId,
-      csv_download_path: result.csvDownloadPath,
+      answer,
+      sql_query: result.sqlQuery,
+      results: rawResult !== undefined ? { raw_result: rawResult } : undefined,
       debug: {
         request_id: requestId,
         elapsed_time_ms: elapsedTime,
@@ -176,7 +192,7 @@ export async function processChat(
         query_result: result.queryResult,
         conversation: {
           question: payload.question,
-          answer: result.answer,
+          answer: conversationAnswer,
           chat_history: payload.chat_history,
         },
       },

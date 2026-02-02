@@ -31,7 +31,7 @@ export const TABLE_METADATA: TableMetadata[] = [
   },
   {
     name: 'device_current_data',
-    description: 'Stores current/latest device data including location (latitude, longitude), temperature, battery, facility information, and event timestamps',
+    description: 'Stores current/latest device data including location, temperature, battery, facility, and event timestamps. Use for list of devices that experienced shock (or free-fall) after a date: select device_id, device_name, shock_event_time (or free_fall_event_time) from device_current_data joined with user_device_assignment; do NOT use shock_info for list-by-date (shock_info is full history and slow).',
     importantFields: [
       'id (PRIMARY KEY)',
       'device_id (UNIQUE, links to device_details_table.device_id)',
@@ -43,9 +43,9 @@ export const TABLE_METADATA: TableMetadata[] = [
       'temperature, battery',
       'travel_distance, dwell_time_seconds, dwell_time',
       'shock_id (links to shock_info.id)',
-      'shock_event_time',
+      'shock_event_time (use for "devices that experienced shock after date" - do not join shock_info)',
       'free_fall_id (links to shock_info.id)',
-      'free_fall_event_time',
+      'free_fall_event_time (use for free-fall after date - do not join shock_info)',
       'updated_at',
     ],
   },
@@ -167,7 +167,7 @@ export const TABLE_METADATA: TableMetadata[] = [
   },
   {
     name: 'shock_info',
-    description: 'Stores shock event information including shock type and timestamps. Tracks physical shock events detected by devices',
+    description: 'Full history of shock/free-fall events (one row per event). For "list of devices that experienced shock after [date]" or "who and when" use device_current_data.shock_event_time instead - do NOT join shock_info for that (table is large and query will timeout).',
     importantFields: [
       'id (PRIMARY KEY)',
       'device_id',

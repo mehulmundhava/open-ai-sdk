@@ -149,8 +149,6 @@ export class DatabaseService {
    */
   async executeListQuery(query: string, limit: number = 3): Promise<QueryResult | null> {
     try {
-      // Execute query as-is without adding LIMIT clause
-      // The tool will handle CSV generation and preview limiting
       const result = await this.executeQuery(query, true);
       return result;
     } catch (error) {

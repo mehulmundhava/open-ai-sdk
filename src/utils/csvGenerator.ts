@@ -25,11 +25,12 @@ export interface CSVInfo {
 
 /**
  * Generate CSV from query result text and return metadata.
+ * Waits for file write to complete so download is available immediately (Python behavior).
  */
-export function generateCSVFromResult(
+export async function generateCSVFromResult(
   resultText: string,
   maxRows: number = 5
-): CSVInfo | null {
+): Promise<CSVInfo | null> {
   try {
     // Parse the result text (SQLDatabase returns formatted string)
     // Format is typically: "column1 | column2 | ...\nvalue1 | value2 | ..."
@@ -79,9 +80,7 @@ export function generateCSVFromResult(
       header: headers.map((h) => ({ id: h, title: h })),
     });
 
-    csvWriter.writeRecords(rows).catch((error) => {
-      logger.error(`Error writing CSV file: ${error}`);
-    });
+    await csvWriter.writeRecords(rows);
 
     // Get preview rows (first maxRows)
     const previewRows = rows.slice(0, maxRows);
@@ -124,11 +123,12 @@ export function getCSVById(csvId: string): string | null {
 
 /**
  * Format query result with CSV generation for large results.
+ * Awaits CSV file write so download link works immediately (Python behavior).
  */
-export function formatResultWithCSV(
+export async function formatResultWithCSV(
   resultText: string,
   maxPreviewRows: number = 3
-): string {
+): Promise<string> {
   try {
     // Parse result to count rows
     const lines = resultText.trim().split('\n');
@@ -145,8 +145,8 @@ export function formatResultWithCSV(
       return resultText;
     }
 
-    // Generate CSV for large results
-    const csvInfo = generateCSVFromResult(resultText, maxPreviewRows);
+    // Generate CSV for large results (await so file exists before returning link)
+    const csvInfo = await generateCSVFromResult(resultText, maxPreviewRows);
 
     if (!csvInfo) {
       // Fallback: return preview only
@@ -177,14 +177,15 @@ CSV ID: ${csvInfo.csv_id}`;
 
 /**
  * Generate CSV from journey list result.
+ * Waits for file write so download is available immediately (Python behavior).
  */
-export function generateCSVFromJourneyList(
+export async function generateCSVFromJourneyList(
   journeyResult: {
     journies?: Array<Record<string, any>>;
     facilities_details?: Record<string, any>;
   },
   maxPreview: number = 5
-): CSVInfo | null {
+): Promise<CSVInfo | null> {
   try {
     const journies = journeyResult.journies || [];
     const facilitiesDetails = journeyResult.facilities_details || {};
@@ -249,9 +250,7 @@ export function generateCSVFromJourneyList(
       header: headers.map((h) => ({ id: h, title: h })),
     });
 
-    csvWriter.writeRecords(csvRows).catch((error) => {
-      logger.error(`Error writing journey CSV file: ${error}`);
-    });
+    await csvWriter.writeRecords(csvRows);
 
     // Get preview journeys (first maxPreview)
     const previewJournies = journies.slice(0, maxPreview);
@@ -278,14 +277,15 @@ export function generateCSVFromJourneyList(
 
 /**
  * Format journey list result with CSV generation for large results.
+ * Awaits CSV file write so download link works immediately (Python behavior).
  */
-export function formatJourneyListWithCSV(
+export async function formatJourneyListWithCSV(
   journeyResult: {
     journies?: Array<Record<string, any>>;
     facilities_details?: Record<string, any>;
   },
   maxPreview: number = 5
-): string {
+): Promise<string> {
   try {
     const journies = journeyResult.journies || [];
     const totalJourneys = journies.length;
@@ -295,8 +295,8 @@ export function formatJourneyListWithCSV(
       return JSON.stringify(journeyResult, null, 2);
     }
 
-    // Generate CSV for large results
-    const csvInfo = generateCSVFromJourneyList(journeyResult, maxPreview);
+    // Generate CSV for large results (await so file exists before returning link)
+    const csvInfo = await generateCSVFromJourneyList(journeyResult, maxPreview);
 
     if (!csvInfo) {
       // Fallback: return full result

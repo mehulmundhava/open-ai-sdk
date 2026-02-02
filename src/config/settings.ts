@@ -33,6 +33,8 @@ export interface Settings {
   
   // API Configuration
   apiBaseUrl: string;
+  /** Base URL for links (CSV download). Use localhost instead of 0.0.0.0 so links work in browser. */
+  apiBaseUrlForLinks: string;
   port: number;
   
   // Vector Cache Configuration
@@ -88,6 +90,11 @@ export const settings: Settings = {
   
   // API
   apiBaseUrl: getEnv('API_BASE_URL', 'http://localhost:3009').replace(/\/$/, ''),
+  /** Base URL for links (e.g. CSV download). Use localhost instead of 0.0.0.0 so links work in browser. */
+  get apiBaseUrlForLinks(): string {
+    const base = this.apiBaseUrl;
+    return base.includes('0.0.0.0') ? base.replace(/0\.0\.0\.0/g, 'localhost') : base;
+  },
   port: getEnvNumber('PORT', 3009),
   
   // Vector Cache
