@@ -452,22 +452,28 @@ export class AgentResponseProcessor {
       tokensExtracted = this.recordTokenUsage('main_agent', result.usage);
     }
 
-    // Method 2: Check state.modelResponses
-    if (!tokensExtracted && resultAny.state?.modelResponses) {
-      tokensExtracted = this.extractTokensFromModelResponses(resultAny.state.modelResponses);
+    // Method 2: Check state.modelResponses (ALWAYS check this for detailed usage with cached_tokens)
+    // This is important because providerData.usage contains prompt_tokens_details with cached_tokens
+    // We ALWAYS check this even if other methods found tokens, to ensure we capture all cached_tokens
+    if (resultAny.state?.modelResponses && Array.isArray(resultAny.state.modelResponses)) {
+      const modelResponseExtracted = this.extractTokensFromModelResponses(resultAny.state.modelResponses);
+      tokensExtracted = tokensExtracted || modelResponseExtracted;
     }
 
     // Method 3: Check state.usage
-    if (!tokensExtracted && resultAny.state?.usage) {
-      tokensExtracted = this.recordTokenUsage('state_usage', resultAny.state.usage);
+    if (resultAny.state?.usage) {
+      const stateUsageExtracted = this.recordTokenUsage('state_usage', resultAny.state.usage);
+      tokensExtracted = tokensExtracted || stateUsageExtracted;
     }
 
     // Method 4: Check steps
-    if (!tokensExtracted && 'steps' in result && Array.isArray(result.steps)) {
-      tokensExtracted = this.extractTokensFromSteps(result.steps);
+    if ('steps' in result && Array.isArray(result.steps)) {
+      const stepsExtracted = this.extractTokensFromSteps(result.steps);
+      tokensExtracted = tokensExtracted || stepsExtracted;
     }
 
-    // Method 5: Deep search in state
+    // Method 5: Deep search in state (only if we haven't found anything yet, to avoid duplicates)
+    // But we still want to check for providerData.usage in nested structures
     if (!tokensExtracted && resultAny.state) {
       tokensExtracted = this.deepSearchTokenUsage(resultAny.state);
     }
@@ -487,11 +493,23 @@ export class AgentResponseProcessor {
     try {
       const tokens = TokenTracker.fromAgentsUsage(usage);
       this.tokenTracker.recordStage(stage, tokens);
-      logger.info(`💰 Token usage [${stage}]:`, {
+      
+      // Log cached tokens if available
+      const cachedTokens = tokens.cachedTokens || tokens.promptTokensDetails?.cached_tokens || 0;
+      const logData: any = {
         promptTokens: tokens.promptTokens,
         completionTokens: tokens.completionTokens,
         totalTokens: tokens.totalTokens,
-      });
+      };
+      
+      if (cachedTokens > 0) {
+        logData.cachedTokens = cachedTokens;
+        logData.cacheHitRate = tokens.promptTokens > 0 
+          ? `${((cachedTokens / tokens.promptTokens) * 100).toFixed(2)}%`
+          : '0%';
+      }
+      
+      logger.info(`💰 Token usage [${stage}]:`, logData);
       return true;
     } catch (error) {
       logger.warn(`⚠️  Failed to parse usage for ${stage}:`, error);
@@ -504,13 +522,39 @@ export class AgentResponseProcessor {
    */
   private extractTokensFromModelResponses(modelResponses: any[]): boolean {
     let extracted = false;
+    logger.info(`🔍 Extracting tokens from ${modelResponses.length} model responses`);
+    
     for (let i = 0; i < modelResponses.length; i++) {
-      if (modelResponses[i]?.usage) {
-        if (this.recordTokenUsage(`model_response_${i}`, modelResponses[i].usage)) {
+      const response = modelResponses[i];
+      
+      // Check providerData.usage first (contains detailed usage with cached_tokens)
+      // This is the most important source for cached_tokens
+      if (response?.providerData?.usage) {
+        const usage = response.providerData.usage;
+        logger.info(`📊 Found providerData.usage in model_response[${i}]`, {
+          prompt_tokens: usage.prompt_tokens,
+          cached_tokens: usage.prompt_tokens_details?.cached_tokens || 0
+        });
+        if (this.recordTokenUsage(`model_response_${i}_provider`, usage)) {
+          extracted = true;
+          // Log if we found cached_tokens
+          const cachedTokens = usage.prompt_tokens_details?.cached_tokens || 0;
+          if (cachedTokens > 0) {
+            logger.info(`✅ Found cached_tokens in model_response_${i}_provider: ${cachedTokens}`);
+          }
+        }
+      }
+      
+      // Also check direct usage property (fallback)
+      if (response?.usage) {
+        logger.info(`📊 Found direct usage in model_response[${i}]`);
+        if (this.recordTokenUsage(`model_response_${i}`, response.usage)) {
           extracted = true;
         }
       }
     }
+    
+    logger.info(`🔍 Extraction complete: ${extracted ? 'found' : 'not found'} tokens from modelResponses`);
     return extracted;
   }
 
@@ -537,25 +581,35 @@ export class AgentResponseProcessor {
   private deepSearchTokenUsage(obj: any, path: string = ''): boolean {
     if (!obj || typeof obj !== 'object') return false;
 
-    // Check if this object has usage-like properties
-    if (obj.usage && typeof obj.usage === 'object') {
-      return this.recordTokenUsage(`deep_search_${path}`, obj.usage);
-    }
-    if (obj.prompt_tokens !== undefined || obj.completion_tokens !== undefined || obj.total_tokens !== undefined) {
-      return this.recordTokenUsage(`deep_search_${path}`, obj);
+    let found = false;
+
+    // Check providerData.usage first (contains detailed usage with cached_tokens)
+    if (obj.providerData?.usage && typeof obj.providerData.usage === 'object') {
+      this.recordTokenUsage(`deep_search_${path}_provider`, obj.providerData.usage);
+      found = true;
     }
 
-    // Recursively search nested objects
+    // Check if this object has usage-like properties
+    if (obj.usage && typeof obj.usage === 'object') {
+      this.recordTokenUsage(`deep_search_${path}`, obj.usage);
+      found = true;
+    }
+    if (obj.prompt_tokens !== undefined || obj.completion_tokens !== undefined || obj.total_tokens !== undefined) {
+      this.recordTokenUsage(`deep_search_${path}`, obj);
+      found = true;
+    }
+
+    // Recursively search nested objects (continue searching even if we found something)
     for (const key in obj) {
       if (obj.hasOwnProperty(key) && typeof obj[key] === 'object' && obj[key] !== null) {
-        const found = this.deepSearchTokenUsage(
+        const childFound = this.deepSearchTokenUsage(
           obj[key],
           path ? `${path}.${key}` : key
         );
-        if (found) return true;
+        found = found || childFound;
       }
     }
-    return false;
+    return found;
   }
 
   /**
@@ -565,17 +619,36 @@ export class AgentResponseProcessor {
     const totalUsage = this.tokenTracker.getTotal();
     const report = this.tokenTracker.getReport();
 
+    // Calculate total cached tokens across all stages
+    const totalCachedTokens = report.stages.reduce(
+      (sum, stage) => sum + (stage.tokens.cachedTokens || 0),
+      0
+    );
+
+    // Log cached tokens benefit
+    if (totalCachedTokens > 0) {
+      logger.info(`📦 Performance: ${totalCachedTokens} tokens saved via prompt cache`, {
+        cachedTokens: totalCachedTokens,
+        totalPromptTokens: totalUsage.promptTokens,
+        cacheHitRate: totalUsage.promptTokens > 0 
+          ? `${((totalCachedTokens / totalUsage.promptTokens) * 100).toFixed(2)}%`
+          : '0%',
+      });
+    }
+
     logger.info('💰 Token Usage Summary:', {
       total: {
         promptTokens: totalUsage.promptTokens,
         completionTokens: totalUsage.completionTokens,
         totalTokens: totalUsage.totalTokens,
+        cachedTokens: totalCachedTokens,
       },
       stages: report.stages.map(s => ({
         stage: s.stage,
         promptTokens: s.tokens.promptTokens,
         completionTokens: s.tokens.completionTokens,
         totalTokens: s.tokens.totalTokens,
+        cachedTokens: s.tokens.cachedTokens || 0,
       })),
       toolCallsCount: toolCalls.length,
       requestDuration: report.endTime && report.startTime 

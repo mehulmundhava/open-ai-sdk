@@ -126,6 +126,24 @@ export async function processChat(
     );
     const journeyToolSql = journeyToolCall?.input?.sql;
 
+    // Calculate total cached tokens from token usage
+    const totalCachedTokens = result.tokenUsage?.total?.cachedTokens || 
+                              result.tokenUsage?.stages?.reduce(
+                                (sum: number, stage: any) => sum + (stage.tokens?.cachedTokens || 0),
+                                0
+                              ) || 0;
+
+    // Log cached tokens benefit
+    if (totalCachedTokens > 0) {
+      requestLogger.info(`📦 Performance: ${totalCachedTokens} tokens saved via prompt cache`, {
+        cachedTokens: totalCachedTokens,
+        totalPromptTokens: result.tokenUsage?.total?.promptTokens || 0,
+        cacheHitRate: result.tokenUsage?.total?.promptTokens 
+          ? `${((totalCachedTokens / result.tokenUsage.total.promptTokens) * 100).toFixed(2)}%`
+          : '0%',
+      });
+    }
+
     // Build response
     const response: ChatResponse = {
       token_id: payload.token_id,
@@ -141,6 +159,14 @@ export async function processChat(
         elapsed_time_ms: elapsedTime,
         token_usage: result.tokenUsage,
         token_usage_history: result.tokenUsage?.stages || [],
+        cached_tokens: totalCachedTokens, // Add cached tokens to debug
+        cache_performance: totalCachedTokens > 0 ? {
+          cached_tokens: totalCachedTokens,
+          total_prompt_tokens: result.tokenUsage?.total?.promptTokens || 0,
+          cache_hit_rate: result.tokenUsage?.total?.promptTokens 
+            ? `${((totalCachedTokens / result.tokenUsage.total.promptTokens) * 100).toFixed(2)}%`
+            : '0%',
+        } : undefined,
         tool_calls: result.toolCalls,
         tool_calls_count: result.toolCalls?.length || 0,
         tool_errors: result.toolErrors,

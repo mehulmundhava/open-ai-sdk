@@ -305,7 +305,7 @@ export function formatJourneyListWithCSV(
 
     // Create result with preview and CSV link
     const previewResult = {
-      facilities_details: journeyResult.facilities_details || {},
+      // facilities_details: journeyResult.facilities_details || {},
       journies: csvInfo.preview_rows,
       total_journeys: totalJourneys,
       preview_count: maxPreview,

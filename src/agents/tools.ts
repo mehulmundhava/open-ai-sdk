@@ -544,17 +544,17 @@ This tool:
       const facilitiesCount = Object.keys(journeyResult.facilities_details).length;
 
       // Format result with CSV if > 3 journeys
-      if (journeyCount > 3) {
+      // if (journeyCount > 3) {
         logger.info(`   📊 Large result detected (${journeyCount} journeys), generating CSV...`);
         const resultJson = formatJourneyListWithCSV(journeyResult, 3);
         logger.info(`   ✅ Showing first 3 journeys, CSV available for all ${journeyCount} journeys`);
         return resultJson;
-      } else {
-        // Format result normally (no CSV needed)
-        const resultJson = JSON.stringify(journeyResult, null, 2);
-        logger.info(`   ✅ Showing all ${journeyCount} journeys (no CSV needed)`);
-        return resultJson;
-      }
+      // } else {
+      //   // Format result normally (no CSV needed)
+      //   const resultJson = JSON.stringify(journeyResult, null, 2);
+      //   logger.info(`   ✅ Showing all ${journeyCount} journeys (no CSV needed)`);
+      //   return resultJson;
+      // }
     } catch (error: any) {
       const errorMessage = error?.message || String(error);
       const errorStack = error?.stack || 'No stack trace available';

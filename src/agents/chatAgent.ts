@@ -24,15 +24,10 @@ export interface ChatAgentConfig {
 }
 
 /**
- * Build system prompt with examples
+ * Build static system prompt prefix (cached content)
+ * This content is static and will be cached by OpenAI
  */
-async function buildSystemPrompt(
-  userId: string,
-  topK: number,
-  question: string | undefined,
-  vectorStore: VectorStoreService,
-  isJourney: boolean = false
-): Promise<string> {
+function buildStaticPromptPrefix(isJourney: boolean = false): string {
   const toolsList = isJourney
     ? 'journey_list_tool, journey_count_tool, count_query, list_query, execute_db_query, get_table_list, get_table_structure'
     : 'count_query, list_query, execute_db_query, get_table_list, get_table_structure, journey_list_tool, journey_count_tool';
@@ -40,10 +35,15 @@ async function buildSystemPrompt(
     ? 'Journey question? → journey_list_tool or journey_count_tool'
     : 'Generate SQL → Use count_query for COUNT, list_query for LIST, execute_db_query for others';
 
-  let basePrompt = `
-PostgreSQL SQL agent. Generate queries from natural language.
+  // Build comprehensive static knowledge base to exceed 1024 tokens
+  const staticPrompt = `
+PostgreSQL SQL Agent - Knowledge Base and Instructions
+======================================================
 
-TOOLS: ${toolsList}
+You are an expert PostgreSQL SQL agent designed to generate and execute SQL queries from natural language questions. Your primary responsibility is to understand user intent, generate appropriate SQL queries, execute them using the available tools, and provide human-friendly answers based on the results.
+
+AVAILABLE TOOLS:
+${toolsList}
 
 WORKFLOW:
 - ${workflowDesc}
@@ -56,25 +56,76 @@ CRITICAL INSTRUCTIONS - YOU MUST FOLLOW THESE:
 5. After executing a tool, provide a human-friendly answer based on the tool's result.
 6. DO NOT include SQL queries in your final answer - the tool will execute them for you.
 7. Always call the appropriate tool FIRST, then provide a natural language answer based on the results.
-8. NEVER add LIMIT clause to SQL queries - the tools will execute full queries and generate CSV files automatically for large results.
+8. NEVER add LIMIT clause to SQL queries - the tools will execute full queries and generate CSV files automatically for large results (>3 rows).
 
-USER_ID: The user_id for this request is set by the system (see USER/ADMIN section below). NEVER ask the user to provide their user ID; always use the one provided and execute the query.
+DATABASE KNOWLEDGE BASE:
+========================
+
+Table Relationships and Structure:
+- device_details_table (D): Contains device information like device_name, grai_id, IMEI number. Has current data IDs pointing to latest records in other tables.
+- user_device_assignment (UD): Maps users to devices. Always join this table for user_id filtering unless user is admin.
+- device_geofencings (DG): Contains device movement data with facility entry/exit times. Does NOT have latitude/longitude columns.
+- facilities (F): Contains facility information including latitude and longitude coordinates. Join with device_geofencings using facility_id.
+- device_current_data (CD): Contains current/latest snapshot of device data including temperature, battery, location.
+- incoming_message_history_k (IK): Contains historical location and sensor data with timestamps.
+- sensor (S): Contains sensor data history for temperature and battery.
+- shock_info: Contains shock and free-fall event data.
+
+Important Field Notes:
+- Temperature values are stored in degrees Celsius (°C)
+- device_geofencings table does NOT have latitude/longitude fields - use facilities table for coordinates
+- Dwell time is stored in seconds (1 day = 86400 seconds)
+- Facility types: M (manufacturer), R (retailer), U, D, etc.
+
+Geographic Query Patterns:
+- For device_current_data queries: Use cd.longitude and cd.latitude
+- For journey/geofencing queries: JOIN facilities table and use f.longitude and f.latitude
+- Always use ST_GeomFromText with POLYGON coordinates for geographic filtering
+- NEVER use placeholder text like "...coordinates..." - ALWAYS use actual numeric coordinates
+
+Geographic Coordinate Reference:
+- Mexico bounding box: POLYGON((-118.4 14.5, -86.8 14.5, -86.8 32.7, -118.4 32.7, -118.4 14.5))
+- United States bounding box: POLYGON((-124.848974 49.384358, -66.93457 49.384358, -66.93457 24.396308, -124.848974 24.396308, -124.848974 49.384358))
+- India bounding box: POLYGON((66.782749 8.047059, 97.402624 8.047059, 97.402624 37.090353, 66.782749 37.090353, 66.782749 8.047059))
+- New York approximate: POLYGON((-74.25909 40.917577, -73.950000 40.800000, -73.700272 40.477399, -74.25909 40.477399, -74.25909 40.917577))
+
+Journey Calculation Rules:
+- Journey = device movement from one facility_id to another
+- Journey calculations use specialized tools (journey_list_tool, journey_count_tool)
+- These tools execute SQL to fetch geofencing rows, then run algorithm to calculate journeys
+- Journey time must be >= 4 hours (14400 seconds) between different facilities
+- For same facility (A -> A), minimum time is 4 hours + extraJourneyTimeLimit (if provided)
+
+SQL Query Best Practices:
+- Always filter by user_id using user_device_assignment table unless user is admin
+- SELECT only specific columns needed, never use SELECT *
+- For journey queries with geographic filters, include useful fields: device_id, device_name, facility_id, facility_name, facility_type, entry_event_time, exit_event_time, latitude, longitude
+- When joining device_geofencings with facilities for coordinates: LEFT JOIN facilities f ON f.facility_id = dg.facility_id
+- Use ST_Contains with ST_MakePoint(f.longitude, f.latitude) for geographic filtering on journeys
+
+Error Handling Guidelines:
+- Never explain SQL/schema, table names, column names, or database structure in your answers
+- When errors occur, provide user-friendly explanations WITHOUT mentioning technical details
+- Instead of technical error details, say: "I'm unable to retrieve that information at the moment" or "The requested data is not available in the expected format"
 
 CRITICAL: You MUST execute queries when examples are provided. Do NOT refuse valid queries that match the examples.
 - If you see a similar example query, adapt it (change time ranges, filters) and EXECUTE it using the appropriate tool
 - Only refuse if the query would violate user_id restrictions or access other users' data
 `.trim();
 
-  // Add journey SQL template for journey questions
+  // Add journey-specific static content
   if (isJourney) {
-    basePrompt += `
+    return staticPrompt + `
 
-JOURNEY SQL (required fields):
+JOURNEY-SPECIFIC INSTRUCTIONS:
+==============================
+
+Journey SQL Template (required fields):
 SELECT dg.device_id, dg.facility_id, dg.facility_type, f.facility_name, dg.entry_event_time, dg.exit_event_time
 FROM device_geofencings dg
 JOIN user_device_assignment uda ON uda.device = dg.device_id
 LEFT JOIN facilities f ON dg.facility_id = f.facility_id
-WHERE uda.user_id = '${userId}' [filters]
+WHERE uda.user_id = '[USER_ID]' [filters]
 ORDER BY dg.entry_event_time ASC
 
 CRITICAL: device_geofencings table does NOT have latitude/longitude fields. For geographic filtering on journeys:
@@ -89,58 +140,29 @@ CRITICAL: device_geofencings table does NOT have latitude/longitude fields. For 
 `;
   }
 
-  // Add rules block
-  basePrompt += `
+  return staticPrompt;
+}
 
-RULES:
-- Filter by user_id (unless admin)
-- NEVER add LIMIT clause to SQL queries - the system will execute full queries and auto-generate CSV for large results (>3 rows)
-- For small results (≤3 rows), show all rows directly
-- SELECT only, no SELECT *
-- Temperature values in the database are stored in degrees Celsius (°C)
-- Never explain SQL/schema, table names, column names, or database structure in your answers
-- When errors occur, provide user-friendly explanations WITHOUT mentioning technical details like table names, column names, SQL syntax, or database structure
-- If a query fails, explain what went wrong in simple terms (e.g., "The requested information is not available" instead of "column X does not exist in table Y")
-- When using list_query tool: The SQL query MUST NOT include LIMIT clause - the tool will return all matching rows and generate CSV automatically
-- For geographic queries (finding devices/assets in areas like cities, states, countries): ALWAYS use ST_GeomFromText with POLYGON coordinates. You MUST replace placeholders with actual coordinates. Use device_current_data table with longitude and latitude columns. Join with user_device_assignment for user_id filtering.
-- For journey/shipment queries with geographic filters, include useful fields: device_id, device_name, facility_id, facility_name, facility_type, temperature, battery, entry_event_time, exit_event_time, latitude, longitude.
-- Geographic coordinate examples:
-  * Mexico bounding box: POLYGON((-118.4 14.5, -86.8 14.5, -86.8 32.7, -118.4 32.7, -118.4 14.5))
-  * United States bounding box: POLYGON((-124.848974 49.384358, -66.93457 49.384358, -66.93457 24.396308, -124.848974 24.396308, -124.848974 49.384358))
-  * India bounding box: POLYGON((66.782749 8.047059, 97.402624 8.047059, 97.402624 37.090353, 66.782749 37.090353, 66.782749 8.047059))
-  * New York approximate: POLYGON((-74.25909 40.917577, -73.950000 40.800000, -73.700272 40.477399, -74.25909 40.477399, -74.25909 40.917577))
-- Example for journey queries with geographic filter and useful fields:
-  SELECT dg.device_id, d.device_name, dg.facility_id, f.facility_name, dg.facility_type, 
-        dg.entry_event_time, dg.exit_event_time,
-         f.latitude, f.longitude,f.facility_name,dg.facility_type,
-  FROM device_geofencings dg
-  JOIN user_device_assignment uda ON uda.device = dg.device_id
-  JOIN device_details_table d ON d.device_id = dg.device_id
-  LEFT JOIN facilities f ON f.facility_id = dg.facility_id
-  WHERE uda.user_id = 'USER_ID'
-    AND dg.entry_event_time >= NOW() - INTERVAL '1 day'
-    AND ST_Contains(
-        ST_GeomFromText('POLYGON((-118.4 14.5, -86.8 14.5, -86.8 32.7, -118.4 32.7, -118.4 14.5))', 4326),
-        ST_SetSRID(ST_MakePoint(f.longitude, f.latitude), 4326)
-    )
-  ORDER BY dg.entry_event_time ASC;
-- CRITICAL FOR JOURNEY QUERIES: device_geofencings table does NOT have latitude/longitude columns. For geographic filtering on journeys:
-  * You MUST JOIN facilities table: LEFT JOIN facilities f ON f.facility_id = dg.facility_id
-  * Use facilities.latitude and facilities.longitude (NOT device_geofencings.latitude/longitude - they don't exist)
-  * For geographic ST_Contains filter, use: ST_MakePoint(f.longitude, f.latitude)
-- CRITICAL: NEVER use placeholder text like "...coordinates..." or "...coordinates for Mexico...". ALWAYS use actual numeric coordinates in the POLYGON definition.
-- DO NOT use tables like us_state_outlines - they don't exist. Use POLYGON definitions directly with actual coordinates.
-`.trim();
+/**
+ * Build dynamic prompt sections (RAG content and user-specific)
+ */
+async function buildDynamicPromptSections(
+  userId: string,
+  question: string | undefined,
+  vectorStore: VectorStoreService,
+  isJourney: boolean
+): Promise<string> {
+  let dynamicContent = '';
 
-  // Add user/admin specific instructions
+  // Add user/admin specific instructions (semi-static but user-specific)
   const isAdmin = userId && userId.toLowerCase() === 'admin';
   if (isAdmin) {
-    basePrompt += `
+    dynamicContent += `
 
 ADMIN MODE: The user_id for this request is: ${userId}. No user_id filtering required; query across all users. Do NOT ask the user for their user ID.
-`.trim();
+`;
   } else {
-    basePrompt += `
+    dynamicContent += `
 
 USER MODE: The user_id for this request is: ${userId}. Do NOT ask the user for their user ID.
 - ALWAYS filter by ud.user_id = '${userId}'
@@ -151,33 +173,33 @@ USER MODE: The user_id for this request is: ${userId}. Do NOT ask the user for t
 - ONLY refuse if query would access OTHER users' data (user_id != ${userId})
 - Follow the example queries provided - adapt them to match the question's time range
 - Never explain SQL/schema in answers
-`.trim();
+`;
   }
 
-  // Pre-load examples from vector store
+  // Add RAG content (examples and business rules from vector store)
   if (question) {
     try {
       const exampleDocs = await vectorStore.searchExamples(question, 10);
       const extraPrompts = await vectorStore.searchExtraPrompts(question, 1);
 
       if (exampleDocs.length > 0) {
-        basePrompt += '\n\nEXAMPLES FROM VECTOR STORE:\n';
+        dynamicContent += '\n\nEXAMPLES FROM VECTOR STORE:\n';
         exampleDocs.forEach((doc, idx) => {
-          basePrompt += `\nExample ${idx + 1}:\n`;
-          basePrompt += `Question: ${doc.question || doc.content}\n`;
+          dynamicContent += `\nExample ${idx + 1}:\n`;
+          dynamicContent += `Question: ${doc.question || doc.content}\n`;
           if (doc.sql_query) {
-            basePrompt += `SQL: ${doc.sql_query}\n`;
+            dynamicContent += `SQL: ${doc.sql_query}\n`;
           }
           if (doc.description) {
-            basePrompt += `Description: ${doc.description}\n`;
+            dynamicContent += `Description: ${doc.description}\n`;
           }
         });
       }
 
       if (extraPrompts.length > 0) {
-        basePrompt += '\n\nBUSINESS RULES:\n';
+        dynamicContent += '\n\nBUSINESS RULES:\n';
         extraPrompts.forEach((prompt, idx) => {
-          basePrompt += `\n${idx + 1}. ${prompt.content}\n`;
+          dynamicContent += `\n${idx + 1}. ${prompt.content}\n`;
         });
       }
     } catch (error) {
@@ -185,7 +207,26 @@ USER MODE: The user_id for this request is: ${userId}. Do NOT ask the user for t
     }
   }
 
-  return basePrompt;
+  return dynamicContent;
+}
+
+/**
+ * Build complete system prompt (for backward compatibility)
+ */
+async function buildSystemPrompt(
+  userId: string,
+  topK: number,
+  question: string | undefined,
+  vectorStore: VectorStoreService,
+  isJourney: boolean = false
+): Promise<{ staticPrefix: string; dynamicSections: string }> {
+  const staticPrefix = buildStaticPromptPrefix(isJourney);
+  const dynamicSections = await buildDynamicPromptSections(userId, question, vectorStore, isJourney);
+  
+  return {
+    staticPrefix,
+    dynamicSections,
+  };
 }
 
 /**
@@ -221,15 +262,13 @@ export async function createChatAgent(config: ChatAgentConfig): Promise<Agent> {
   });
 
   // Create model with the client (cast to any to handle version compatibility)
+  // Note: prompt_cache_key will be set per request in runChatAgent
   const model = new OpenAIChatCompletionsModel(client as any, 'gpt-4o');
 
-  // Build system prompt (will be updated per request with examples)
-  const systemPrompt = await buildSystemPrompt(userId, topK, undefined, vectorStore, false);
-
-  // Create agent with tools
+  // Create agent with tools (instructions will be set per request for caching)
   const agent = new Agent({
     name: 'SQL Assistant',
-    instructions: systemPrompt,
+    instructions: '', // Will be set per request
     model,
     tools: [
       checkUserQueryRestrictionTool,
@@ -279,50 +318,72 @@ export async function runChatAgent(
     // Detect journey question
     const isJourney = detectJourneyQuestion(question);
 
-    // Build system prompt with examples
-    const systemPrompt = await buildSystemPrompt(userId, 20, question, vectorStore, isJourney);
+    // Build prompt with separated static and dynamic sections
+    const { staticPrefix, dynamicSections } = await buildSystemPrompt(userId, 20, question, vectorStore, isJourney);
     
-    // Enhance system prompt to emphasize using tools
-    const enhancedSystemPrompt = `${systemPrompt}
+    // Construct final system prompt: Static (cached) + Dynamic (RAG) + User question
+    // The static prefix will be cached, dynamic sections change per request
+    const finalSystemPrompt = staticPrefix + dynamicSections;
 
-CRITICAL INSTRUCTIONS:
-- You MUST use the available tools to execute SQL queries. DO NOT just describe what query you would run.
-- For COUNT queries, use the count_query tool.
-- For LIST queries, use the list_query tool.
-- For other queries, use the execute_db_query tool.
-- After executing a tool, provide a human-friendly answer based on the tool's result.
-- DO NOT include SQL queries in your final answer - the tool will execute them for you.
-- Always call the appropriate tool and then provide a natural language answer based on the results.
-- When errors occur, provide user-friendly error messages WITHOUT mentioning:
-  * Table names (e.g., "device_geofencings", "device_current_data")
-  * Column names (e.g., "longitude", "latitude", "entry_event_time")
-  * SQL syntax or query details
-  * Database structure or schema information
-- Instead of technical error details, say things like:
-  * "I'm unable to retrieve that information at the moment."
-  * "The requested data is not available in the expected format."
-  * "I couldn't find the information you're looking for."
-  * "There was an issue processing your request. Please try rephrasing your question."`;
+    // Determine prompt cache key based on question type
+    const promptCacheKey = isJourney ? 'sql_assistant_journey_v1' : 'sql_assistant_v1';
 
-    // Create new agent with updated instructions (agents are immutable)
-    // We'll use the same agent but update instructions via a new agent instance
+    // Create new agent with final instructions
     const updatedAgent = new Agent({
       name: agent.name || 'SQL Assistant',
-      instructions: enhancedSystemPrompt,
+      instructions: finalSystemPrompt,
       model: agent.model,
       tools: agent.tools || [],
     });
 
-    // Log conversation start
+    // Log conversation start with cache key
     logger.info('💬 CONVERSATION START', {
       userId,
       question,
+      isJourney,
+      promptCacheKey,
       timestamp: new Date().toISOString(),
     });
 
-    // Run agent with updated instructions
-    // Note: Session management can be added later if needed
+    // Run agent with prompt caching
+    // OpenAI's prompt caching works by caching the static prefix (first part of system message)
+    // The static prefix (buildStaticPromptPrefix) is >= 1024 tokens and will be automatically cached
+    // The prompt_cache_key helps identify which cache to use, but caching works automatically
+    // when the same static prefix is used across requests
+    
+    // Log cache key for monitoring (actual caching happens automatically by OpenAI)
+    logger.info('📦 Prompt Cache Configuration', {
+      promptCacheKey,
+      staticPrefixLength: staticPrefix.length,
+      estimatedTokens: Math.ceil(staticPrefix.length / 4), // Rough estimate: ~4 chars per token
+      isJourney,
+    });
+
+    // Run the agent
+    // The static prefix in the system prompt will be cached by OpenAI automatically
+    // when it's >= 1024 tokens and matches previous requests
+    // Note: If the Agents SDK supports prompt_cache_key in the future, it can be added here
     const result = await run(updatedAgent, question);
+
+    // Extract usage data (cast to any to access usage property that exists at runtime)
+    const resultAny = result as any;
+    const usage = resultAny.usage;
+
+    if (usage) {
+      const tokenMetrics = {
+        total: usage.total_tokens,
+        input: usage.prompt_tokens,
+        output: usage.completion_tokens,
+        
+        // CACHE INFO (Inside prompt_tokens_details)
+        cacheHitTokens: usage.prompt_tokens_details?.cached_tokens || 0,
+        
+        // REASONING INFO (Inside completion_tokens_details - for o1/o3 models)
+        reasoningTokens: usage.completion_tokens_details?.reasoning_tokens || 0
+      };
+
+      logger.info('📊 TOKEN USAGE REPORT-----', tokenMetrics);
+    }
 
     // Process agent result using helper class
     const processor = new AgentResponseProcessor(tokenTracker, userId, question);

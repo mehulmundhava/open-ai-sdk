@@ -49,10 +49,15 @@ Rules for ALLOWING:
 - Queries about device status, locations, facilities
 - Queries about sensor data, battery levels, temperatures
 - Journey-related queries (e.g., "journey", "journeys", "movement", "travel", "facility transitions") - these are legitimate business queries
+- Shipment-related queries (e.g., "shipment", "shipments", "list of shipments", "shipments occurred") - these are legitimate business queries about device movements
 - Queries asking for journey counts, journey lists, journeys between facilities, journeys in time periods
+- Queries asking for shipment lists, shipment counts, shipments in time periods or locations
 - Queries that use proper filtering and don't expose sensitive data
 
-IMPORTANT: Journey queries are business queries about device movement patterns and facility transitions. They are processed by specialized journey calculation tools. These queries should be ALLOWED.
+IMPORTANT: 
+- Journey queries are business queries about device movement patterns and facility transitions. They are processed by specialized journey calculation tools. These queries should be ALLOWED.
+- Shipment queries are business queries about device shipments and movements. They are processed by specialized journey calculation tools. These queries should be ALLOWED.
+- Queries asking for "list of shipments" or "shipments occurred" are legitimate business queries and should be ALLOWED.
 
 User question: ${question}
 
@@ -77,10 +82,16 @@ ALLOW queries that:
 - Query device status, locations, facilities
 - Query sensor data, battery levels, temperatures
 - Journey-related queries (journey, journeys, movement, travel, facility transitions) - these are legitimate business queries
+- Shipment-related queries (shipment, shipments, list of shipments, shipments occurred) - these are legitimate business queries about device movements
 - Queries asking for journey counts, journey lists, journeys between facilities, journeys in time periods
+- Queries asking for shipment lists, shipment counts, shipments in time periods or locations
 - Use proper filtering and don't expose sensitive data
 
-IMPORTANT: Journey queries are business queries about device movement patterns and facility transitions. They are processed by specialized journey calculation tools. These queries should be ALLOWED.
+IMPORTANT: 
+- Journey queries are business queries about device movement patterns and facility transitions. They are processed by specialized journey calculation tools. These queries should be ALLOWED.
+- Shipment queries are business queries about device shipments and movements. They are processed by specialized journey calculation tools. These queries should be ALLOWED.
+- Queries asking for "list of shipments" or "shipments occurred" are legitimate business queries and should be ALLOWED.
+- Do NOT block queries just because they ask for a "list" - if they are about journeys or shipments, they are legitimate business queries.
 
 Always provide a clear reason for your decision.`,
       model,
