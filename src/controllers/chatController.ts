@@ -164,12 +164,19 @@ export async function processChat(
       });
     }
 
+    // Process answer to strip localhost URLs (already done in agentResponseProcessor, but double-check)
+    const processedAnswer = stripLocalhostFromCsvLinks(result.answer);
+
     // Build response
     const response: ChatResponse = {
       token_id: payload.token_id,
-      answer,
+      answer: processedAnswer,
       sql_query: result.sqlQuery,
-      results: rawResult !== undefined ? { raw_result: rawResult } : undefined,
+      results: result.queryResult ? { raw: result.queryResult } : undefined,
+      llm_used: true,
+      llm_type: 'OPENAI/gpt-4o',
+      csv_id: result.csvId,
+      csv_download_path: result.csvDownloadPath,
       debug: {
         request_id: requestId,
         elapsed_time_ms: elapsedTime,
@@ -192,7 +199,7 @@ export async function processChat(
         query_result: result.queryResult,
         conversation: {
           question: payload.question,
-          answer: conversationAnswer,
+          answer: processedAnswer,
           chat_history: payload.chat_history,
         },
       },
