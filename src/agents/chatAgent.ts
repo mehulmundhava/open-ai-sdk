@@ -167,6 +167,11 @@ ADMIN MODE: The user_id for this request is: ${userId}. No user_id filtering req
 USER MODE: The user_id for this request is: ${userId}. Do NOT ask the user for their user ID.
 - ALWAYS filter by ud.user_id = '${userId}'
 - ALWAYS join user_device_assignment (ud)
+- CRITICAL JOIN INSTRUCTION: user_device_assignment table has a field called "device" (NOT "device_id")
+  - Other tables (device_current_data, device_geofencings, etc.) have "device_id" field
+  - CORRECT join: JOIN user_device_assignment ud ON ud.device = other_table.device_id
+  - WRONG join: JOIN user_device_assignment ud ON ud.device_id = other_table.device_id (DO NOT use this)
+  - Example: JOIN user_device_assignment ud ON ud.device = cd.device_id (for device_current_data)
 - Aggregations, GROUP BY, COUNT, SUM, etc. are ALLOWED for this user_id's data
 - Time ranges (days, months, years) are ALLOWED - adapt examples by changing INTERVAL values
 - Multiple visits, repeated facilities, patterns are ALLOWED for this user_id
