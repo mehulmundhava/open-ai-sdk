@@ -12,6 +12,7 @@ import {
   getTableStructureTool,
   journeyListTool,
   journeyCountTool,
+  getAreaBoundsTool,
 } from './tools';
 import { logger } from '../utils/logger';
 import { TokenTracker } from '../utils/tokenTracker';
@@ -29,8 +30,8 @@ export interface ChatAgentConfig {
  */
 function buildStaticPromptPrefix(isJourney: boolean = false): string {
   const toolsList = isJourney
-    ? 'journey_list_tool, journey_count_tool, count_query, list_query, execute_db_query, get_table_list, get_table_structure'
-    : 'count_query, list_query, execute_db_query, get_table_list, get_table_structure, journey_list_tool, journey_count_tool';
+    ? 'journey_list_tool, journey_count_tool, count_query, list_query, execute_db_query, get_table_list, get_table_structure, get_area_bounds'
+    : 'count_query, list_query, execute_db_query, get_table_list, get_table_structure, journey_list_tool, journey_count_tool, get_area_bounds';
   const workflowDesc = isJourney
     ? 'Journey question? → journey_list_tool or journey_count_tool'
     : 'Generate SQL → Use count_query for COUNT, list_query for LIST, execute_db_query for others';
@@ -83,7 +84,24 @@ Geographic Query Patterns:
 - Always use ST_GeomFromText with POLYGON coordinates for geographic filtering
 - NEVER use placeholder text like "...coordinates..." - ALWAYS use actual numeric coordinates
 
-Geographic Coordinate Reference:
+Geographic Boundary Tool (get_area_bounds):
+- When user asks about a specific location (city, state, country, region), FIRST call get_area_bounds tool with STRUCTURED parameters
+- CRITICAL: Use proper parameter keys based on location type:
+  * For COUNTRIES: use { country: "United States" } or { country: "Mexico" }
+  * For STATES/PROVINCES: use { state: "California" } or { state: "Texas" }
+  * For CITIES: use { city: "New York" } or { city: "Los Angeles" }
+  * For GENERAL queries: use { q: "location name" } only as fallback
+  * You can combine: { country: "United States", state: "California" }
+- Examples:
+  * "devices in United States" → get_area_bounds({ country: "United States" })
+  * "shipments in California" → get_area_bounds({ state: "California" })
+  * "facilities in New York" → get_area_bounds({ city: "New York" }) or { state: "New York" }
+  * "journeys in Mexico" → get_area_bounds({ country: "Mexico" })
+- The tool returns JSON with polygon.postgres_format field - use this directly in SQL queries
+- If the tool fails, try using the known coordinates below, or inform the user that the area boundary could not be determined
+- NEVER generate POLYGON coordinates yourself unless the tool fails - always try the tool first with proper parameters
+
+Geographic Coordinate Reference (fallback if get_area_bounds fails):
 - Mexico bounding box: POLYGON((-118.4 14.5, -86.8 14.5, -86.8 32.7, -118.4 32.7, -118.4 14.5))
 - United States bounding box: POLYGON((-124.848974 49.384358, -66.93457 49.384358, -66.93457 24.396308, -124.848974 24.396308, -124.848974 49.384358))
 - India bounding box: POLYGON((66.782749 8.047059, 97.402624 8.047059, 97.402624 37.090353, 66.782749 37.090353, 66.782749 8.047059))
@@ -132,9 +150,14 @@ CRITICAL: device_geofencings table does NOT have latitude/longitude fields. For 
 - You MUST JOIN facilities table: LEFT JOIN facilities f ON f.facility_id = dg.facility_id
 - Use facilities.latitude and facilities.longitude (NOT device_geofencings - these columns don't exist)
 - For geographic ST_Contains filter, use: ST_MakePoint(f.longitude, f.latitude)
-- Example with geographic filter:
+- IMPORTANT: If user mentions a location, FIRST call get_area_bounds with STRUCTURED parameters:
+  * Countries: get_area_bounds({ country: "United States" })
+  * States: get_area_bounds({ state: "California" })
+  * Cities: get_area_bounds({ city: "New York" })
+- Parse the JSON response and extract polygon.postgres_format field
+- Example with geographic filter (using POLYGON from get_area_bounds tool):
   WHERE ST_Contains(
-      ST_GeomFromText('POLYGON((-118.4 14.5, -86.8 14.5, -86.8 32.7, -118.4 32.7, -118.4 14.5))', 4326),
+      ST_GeomFromText('POLYGON((...))', 4326),  -- Use polygon.postgres_format from get_area_bounds tool response
       ST_SetSRID(ST_MakePoint(f.longitude, f.latitude), 4326)
   )
 `;
@@ -284,6 +307,7 @@ export async function createChatAgent(config: ChatAgentConfig): Promise<Agent> {
       getTableStructureTool,
       journeyListTool,
       journeyCountTool,
+      getAreaBoundsTool,
     ] as any,
   });
 

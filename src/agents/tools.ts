@@ -11,6 +11,7 @@ import {
   calculateJourneyList,
   GeofencingRow,
 } from '../services/journeyCalculator';
+import simplify from 'simplify-js';
 
 const databaseService = new DatabaseService();
 
@@ -674,6 +675,351 @@ This tool:
         error: error,
       });
       return `Error calculating journey counts: ${errorMessage}`;
+    }
+  },
+});
+
+/**
+ * Get area bounds tool - fetches geographic polygon for a location from OpenStreetMap
+ */
+export const getAreaBoundsTool = tool({
+  name: 'get_area_bounds',
+  description: `Get the geographic polygon (bounding box) for a location from OpenStreetMap.
+  
+Use this tool when the user asks about a specific location (city, state, country, region) and you need
+to generate a POLYGON for geographic filtering in SQL queries.
+
+IMPORTANT: Pass structured location parameters for accurate results:
+- For countries: use { country: "United States" } or { country: "Mexico" }
+- For states: use { state: "California" } or { state: "Texas" }
+- For cities: use { city: "New York" } or { city: "Los Angeles" }
+- For general queries: use { q: "location name" } as fallback
+- You can combine parameters: { country: "United States", state: "California" }
+
+Examples:
+- "devices in United States" -> { country: "United States" }
+- "shipments in California" -> { state: "California" }
+- "facilities in New York" -> { city: "New York" } or { state: "New York" }
+- "journeys in Mexico" -> { country: "Mexico" }
+
+The tool will:
+1. Query OpenStreetMap API with proper parameters
+2. Extract the bounding box coordinates
+3. Simplify the polygon to reduce complexity
+4. Return a structured JSON response with:
+   - success: boolean indicating if the operation succeeded
+   - location: the location parameters that were queried
+   - bounding_box: object with min_latitude, max_latitude, min_longitude, max_longitude
+   - polygon: object containing:
+     - postgres_format: the POLYGON string ready for PostgreSQL (use this in SQL queries)
+     - points_count: original and simplified point counts
+     - coordinates: array of [longitude, latitude] pairs
+   - usage: SQL example showing how to use the polygon
+
+To use the result:
+- Parse the JSON response
+- Extract polygon.postgres_format field
+- Use it directly in your SQL query with ST_Contains or ST_Within
+
+If the tool fails to find the location, it will return success: false with error details and suggestions.`,
+  parameters: z.object({
+    country: z.string().nullable().optional().describe('Country name (e.g., "United States", "Mexico", "India")'),
+    state: z.string().nullable().optional().describe('State/Province name (e.g., "California", "Texas", "New York")'),
+    city: z.string().nullable().optional().describe('City name (e.g., "New York", "Los Angeles", "Mumbai")'),
+    county: z.string().nullable().optional().describe('County name'),
+    street: z.string().nullable().optional().describe('Street name'),
+    postalcode: z.string().nullable().optional().describe('Postal/ZIP code'),
+    q: z.string().nullable().optional().describe('General query string (use as fallback if specific parameters not available)'),
+    countrycodes: z.string().nullable().optional().describe('ISO 3166-1alpha2 country codes (e.g., "us", "mx", "in")'),
+    polygon_threshold: z.number().nullable().optional().describe('Polygon simplification threshold (0.0-1.0, default: 0.1)'),
+    limit: z.number().nullable().optional().describe('Maximum number of results (default: 1)'),
+  }),
+  execute: async (params: {
+    country?: string | null;
+    state?: string | null;
+    city?: string | null;
+    county?: string | null;
+    street?: string | null;
+    postalcode?: string | null;
+    q?: string | null;
+    countrycodes?: string | null;
+    polygon_threshold?: number | null;
+    limit?: number | null;
+  }) => {
+    logger.info(`🔧 TOOL CALLED: get_area_bounds`);
+    
+    // Filter out null values and create clean params object
+    const cleanParams: Record<string, string | number> = {};
+    if (params.country != null) cleanParams.country = params.country;
+    if (params.state != null) cleanParams.state = params.state;
+    if (params.city != null) cleanParams.city = params.city;
+    if (params.county != null) cleanParams.county = params.county;
+    if (params.street != null) cleanParams.street = params.street;
+    if (params.postalcode != null) cleanParams.postalcode = params.postalcode;
+    if (params.q != null) cleanParams.q = params.q;
+    if (params.countrycodes != null) cleanParams.countrycodes = params.countrycodes;
+    if (params.polygon_threshold != null) cleanParams.polygon_threshold = params.polygon_threshold;
+    if (params.limit != null) cleanParams.limit = params.limit;
+    
+    logger.info(`   Parameters:`, cleanParams);
+
+    try {
+      // Build OpenStreetMap Nominatim API URL with proper parameters
+      const apiParams = new URLSearchParams();
+      
+      // Add structured parameters (prioritize specific over general)
+      if (params.country) {
+        apiParams.append('country', params.country);
+      }
+      if (params.state) {
+        apiParams.append('state', params.state);
+      }
+      if (params.city) {
+        apiParams.append('city', params.city);
+      }
+      if (params.county) {
+        apiParams.append('county', params.county);
+      }
+      if (params.street) {
+        apiParams.append('street', params.street);
+      }
+      if (params.postalcode) {
+        apiParams.append('postalcode', params.postalcode);
+      }
+      if (params.countrycodes) {
+        apiParams.append('countrycodes', params.countrycodes);
+      }
+      
+      // Use 'q' parameter only if no specific parameters provided
+      if (!params.country && !params.state && !params.city && !params.county && !params.street && params.q) {
+        apiParams.append('q', params.q);
+      } else if (params.q && (params.country || params.state || params.city)) {
+        // If both specific params and q are provided, q is ignored (specific params take precedence)
+        logger.info(`   ⚠️  Both specific parameters and 'q' provided, using specific parameters only`);
+      }
+      
+      // Add required/default parameters
+      apiParams.append('format', 'json');
+      apiParams.append('polygon_geojson', '1');
+      apiParams.append('polygon_threshold', String(params.polygon_threshold || 0.1));
+      apiParams.append('limit', String(params.limit || 1));
+      apiParams.append('addressdetails', '1');
+      
+      const apiUrl = `https://nominatim.openstreetmap.org/search?${apiParams.toString()}`;
+      
+      logger.info(`   📡 Calling OpenStreetMap API: ${apiUrl}`);
+
+      const response = await fetch(apiUrl, {
+        headers: {
+          // 1. Identify your specific app clearly
+          'User-Agent': `Shipmentia_App_v1.0 (Contact: mehul@shipmentia.com)`,
+          
+          // 2. Mimic the Browser's "Accept" header 
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+          
+          // 3. Sec-Fetch headers (Crucial to bypass modern WAFs)
+          'Sec-Fetch-Dest': 'document',
+          'Sec-Fetch-Mode': 'navigate',
+          'Sec-Fetch-Site': 'none',
+          'Sec-Fetch-User': '?1'
+        }
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text().catch(() => 'Unknown error');
+        logger.error(`   ❌ API Error: Status ${response.status}, Response: ${errorText}`);
+        throw new Error(`OpenStreetMap API returned status ${response.status}: ${errorText}`);
+      }
+
+      const data = await response.json();
+      
+      logger.info(`   📥 API Response received: ${Array.isArray(data) ? data.length : 'not array'} results`);
+
+      if (!Array.isArray(data) || data.length === 0) {
+        const locationDesc = params.country || params.state || params.city || params.q || 'unknown location';
+        logger.warn(`   ⚠️  No results found for location:`, params);
+        logger.warn(`   Response data: ${JSON.stringify(data).substring(0, 200)}`);
+        return JSON.stringify({
+          success: false,
+          location: cleanParams,
+          error: `No results found for the specified location`,
+          suggestions: [
+            "Use more specific location parameters (e.g., use 'country' for countries, 'state' for states)",
+            "Try different parameter combinations",
+            "Generate the POLYGON manually using known coordinates",
+            "Inform the user that the area boundary could not be determined",
+          ],
+        }, null, 2);
+      }
+
+      const result = data[0];
+      const locationName = result.display_name || result.name || cleanParams.country || cleanParams.state || cleanParams.city || cleanParams.q || 'unknown';
+      logger.info(`   📍 Found location: ${locationName}`);
+      
+      // Extract bounding box from API response (only for reference/logging, not for polygon generation)
+      // const boundingBox = result.boundingbox;
+      // logger.info(`   📦 Has boundingBox: ${!!boundingBox}`);
+      
+      const geojson = result.geojson;
+      logger.info(`   📦 Has geojson: ${!!geojson}`);
+
+      // Extract coordinates from geojson ONLY (do not use bounding box - it has too few points)
+      let rawCoordinates: number[][] = [];
+      
+      if (!geojson || !geojson.coordinates) {
+        logger.error(`   ❌ No geojson coordinates available for location:`, cleanParams);
+        return JSON.stringify({
+          success: false,
+          location: cleanParams,
+          error: "No geojson coordinates available in API response. GeoJSON is required for accurate polygon generation.",
+          suggestions: [
+            "Try a more specific location name",
+            "Generate the POLYGON manually using known coordinates",
+            "Inform the user that the area boundary could not be determined",
+          ],
+        }, null, 2);
+      }
+      
+      logger.info(`   🗺️  GeoJSON type: ${geojson.type}`);
+      
+      try {
+        // Handle MultiPolygon: coordinates[0] is the first polygon, coordinates[0][0] is the outer ring
+        if (geojson.type === 'MultiPolygon' && Array.isArray(geojson.coordinates)) {
+          // Take the first polygon's outer ring
+          const firstPolygon = geojson.coordinates[0];
+          if (firstPolygon && Array.isArray(firstPolygon[0])) {
+            rawCoordinates = firstPolygon[0] || [];
+            logger.info(`   ✅ Extracted MultiPolygon: ${rawCoordinates.length} points`);
+          }
+        } 
+        // Handle Polygon: coordinates[0] is the outer ring
+        else if (geojson.type === 'Polygon' && Array.isArray(geojson.coordinates)) {
+          rawCoordinates = geojson.coordinates[0] || [];
+          logger.info(`   ✅ Extracted Polygon: ${rawCoordinates.length} points`);
+        }
+        // Handle LineString or other types
+        else if (Array.isArray(geojson.coordinates) && geojson.coordinates.length > 0) {
+          const firstCoord = geojson.coordinates[0];
+          if (Array.isArray(firstCoord) && typeof firstCoord[0] === 'number') {
+            rawCoordinates = geojson.coordinates as number[][];
+            logger.info(`   ✅ Extracted LineString/other: ${rawCoordinates.length} points`);
+          }
+        }
+      } catch (geoError: any) {
+        logger.warn(`   ⚠️  Error extracting geojson coordinates: ${geoError?.message}`);
+      }
+
+      // Require geojson coordinates - do not fallback to bounding box (it has too few points)
+      if (rawCoordinates.length === 0) {
+        logger.error(`   ❌ Failed to extract coordinates from geojson for location:`, cleanParams);
+        return JSON.stringify({
+          success: false,
+          location: cleanParams,
+          error: "Failed to extract coordinates from geojson. GeoJSON structure may be unsupported.",
+          suggestions: [
+            "Try a more specific location name",
+            "Generate the POLYGON manually using known coordinates",
+            "Inform the user that the area boundary could not be determined",
+          ],
+        }, null, 2);
+      }
+
+      // Calculate bounding box from geojson coordinates (for reference only, not for polygon)
+      // This gives us min/max lat/lon from the actual polygon coordinates
+      let minLat = Infinity, maxLat = -Infinity, minLon = Infinity, maxLon = -Infinity;
+      rawCoordinates.forEach((coord: any) => {
+        const lon = typeof coord[0] === 'number' ? coord[0] : parseFloat(String(coord[0]));
+        const lat = typeof coord[1] === 'number' ? coord[1] : parseFloat(String(coord[1]));
+        if (!isNaN(lon) && !isNaN(lat)) {
+          minLon = Math.min(minLon, lon);
+          maxLon = Math.max(maxLon, lon);
+          minLat = Math.min(minLat, lat);
+          maxLat = Math.max(maxLat, lat);
+        }
+      });
+      
+      // If no valid coordinates found, use defaults
+      if (minLat === Infinity) {
+        minLat = maxLat = minLon = maxLon = 0;
+      }
+
+      // Convert coordinates to simplify-js format: {x, y}
+      // Note: OpenStreetMap uses [longitude, latitude] format
+      const points = rawCoordinates.map((coord: any) => ({ 
+        x: parseFloat(coord[0]), // longitude
+        y: parseFloat(coord[1])  // latitude
+      }));
+
+      logger.info(`   📊 Original polygon has ${points.length} points`);
+
+      // Simplify polygon using simplify-js
+      // tolerance: higher value = fewer points (0.01 degrees ≈ 1km, 0.1 degrees ≈ 11km)
+      // highQuality: true = better quality but slower
+      const tolerance = 0.001; // Adjust this value to control simplification level
+      const simplifiedPoints = simplify(points, tolerance, true);
+
+      logger.info(`   ✂️  Simplified polygon to ${simplifiedPoints.length} points (tolerance: ${tolerance})`);
+
+      // Convert back to [lon, lat] format and then to PostgreSQL POLYGON string
+      const polygonString = simplifiedPoints
+        .map((p: any) => `${p.x} ${p.y}`) // Format: "lon lat"
+        .join(', ');
+
+      const postgresPolygon = `POLYGON((${polygonString}))`;
+
+      const locationDesc = locationName;
+      logger.info(`   ✅ Generated POLYGON for ${locationDesc}`);
+      logger.info(`   Bounding Box: [${minLat}, ${maxLat}, ${minLon}, ${maxLon}]`);
+      logger.info(`   Points: ${points.length} → ${simplifiedPoints.length} (simplified)`);
+      logger.info(`   POLYGON: ${postgresPolygon.substring(0, 100)}...`);
+
+      // Return structured JSON response for easier LLM handling
+      return JSON.stringify({
+        success: true,
+        location: cleanParams,
+        location_name: locationName,
+        bounding_box: {
+          min_latitude: minLat,
+          max_latitude: maxLat,
+          min_longitude: minLon,
+          max_longitude: maxLon,
+        },
+        polygon: {
+          postgres_format: postgresPolygon,
+          points_count: {
+            original: points.length,
+            simplified: simplifiedPoints.length,
+          },
+          coordinates: simplifiedPoints.map((p: any) => [p.x, p.y]), // [longitude, latitude] pairs
+        },
+        usage: {
+          sql_example: `WHERE ST_Contains(
+              ST_GeomFromText('${postgresPolygon}', 4326),
+              ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)
+          )`,
+          note: "Use the polygon.postgres_format field directly in your SQL query with ST_Contains or ST_Within",
+        },
+      }, null, 2);
+    } catch (error: any) {
+      const errorMessage = error?.message || String(error);
+      logger.error(`❌ Error getting area bounds for location:`, {
+        params: cleanParams,
+        message: errorMessage,
+        error: error,
+      });
+      
+      // Return structured JSON error response
+      return JSON.stringify({
+        success: false,
+        location: cleanParams,
+        error: errorMessage,
+        suggestions: [
+          "Use proper location parameters (e.g., 'country' for countries, 'state' for states, 'city' for cities)",
+          "Try different parameter combinations",
+          "Generate the POLYGON manually using known coordinates",
+          "Inform the user that the area boundary could not be determined",
+        ],
+      }, null, 2);
     }
   },
 });
