@@ -687,7 +687,7 @@ export const getAreaBoundsTool = tool({
   description: `Get the geographic polygon (bounding box) for a location from OpenStreetMap.
   
 Use this tool when the user asks about a specific location (city, state, country, region) and you need
-to generate a POLYGON for geographic filtering in SQL queries.
+to generate a POLYGON or MULTIPOLYGON for geographic filtering in SQL queries.
 
 IMPORTANT: Pass structured location parameters for accurate results:
 - For countries: use { country: "United States" } or { country: "Mexico" }
@@ -704,22 +704,25 @@ Examples:
 
 The tool will:
 1. Query OpenStreetMap API with proper parameters
-2. Extract the bounding box coordinates
-3. Simplify the polygon to reduce complexity
+2. Extract all polygons from the GeoJSON response (handles both Polygon and MultiPolygon)
+3. Simplify each polygon separately to reduce complexity
 4. Return a structured JSON response with:
    - success: boolean indicating if the operation succeeded
    - location: the location parameters that were queried
    - bounding_box: object with min_latitude, max_latitude, min_longitude, max_longitude
    - polygon: object containing:
-     - postgres_format: the POLYGON string ready for PostgreSQL (use this in SQL queries)
-     - points_count: original and simplified point counts
+     - geometry_type: "Polygon" or "MultiPolygon" indicating the geometry type
+     - postgres_format: the POLYGON or MULTIPOLYGON string ready for PostgreSQL (use this in SQL queries)
+     - points_count: original and simplified point counts, plus polygons_count for MultiPolygon
      - coordinates: array of [longitude, latitude] pairs
    - usage: SQL example showing how to use the polygon
 
 To use the result:
 - Parse the JSON response
-- Extract polygon.postgres_format field
+- Extract polygon.postgres_format field (may be POLYGON or MULTIPOLYGON format)
 - Use it directly in your SQL query with ST_Contains or ST_Within
+- Note: For locations with multiple disconnected areas (e.g., countries with islands like Mexico), 
+  the tool returns MULTIPOLYGON format which includes all regions for accurate results
 
 If the tool fails to find the location, it will return success: false with error details and suggestions.`,
   parameters: z.object({
@@ -731,7 +734,7 @@ If the tool fails to find the location, it will return success: false with error
     postalcode: z.string().nullable().optional().describe('Postal/ZIP code'),
     q: z.string().nullable().optional().describe('General query string (use as fallback if specific parameters not available)'),
     countrycodes: z.string().nullable().optional().describe('ISO 3166-1alpha2 country codes (e.g., "us", "mx", "in")'),
-    polygon_threshold: z.number().nullable().optional().describe('Polygon simplification threshold (0.0-1.0, default: 0.1)'),
+    polygon_threshold: z.number().nullable().optional().describe('Polygon simplification threshold (0.0-1.0, default: 0.5)'),
     limit: z.number().nullable().optional().describe('Maximum number of results (default: 1)'),
   }),
   execute: async (params: {
@@ -801,7 +804,7 @@ If the tool fails to find the location, it will return success: false with error
       // Add required/default parameters
       apiParams.append('format', 'json');
       apiParams.append('polygon_geojson', '1');
-      apiParams.append('polygon_threshold', String(params.polygon_threshold || 0.1));
+      apiParams.append('polygon_threshold', String(params.polygon_threshold || 0.5));
       apiParams.append('limit', String(params.limit || 1));
       apiParams.append('addressdetails', '1');
       
@@ -882,27 +885,70 @@ If the tool fails to find the location, it will return success: false with error
       
       logger.info(`   🗺️  GeoJSON type: ${geojson.type}`);
       
+      // Variables to store processed polygons
+      let allPolygons: number[][][] = [];
+      let geometryType: 'Polygon' | 'MultiPolygon' = 'Polygon';
+      let minLat = Infinity, maxLat = -Infinity, minLon = Infinity, maxLon = -Infinity;
+      
       try {
-        // Handle MultiPolygon: coordinates[0] is the first polygon, coordinates[0][0] is the outer ring
+        // Handle MultiPolygon: process ALL polygons, not just the first one
         if (geojson.type === 'MultiPolygon' && Array.isArray(geojson.coordinates)) {
-          // Take the first polygon's outer ring
-          const firstPolygon = geojson.coordinates[0];
-          if (firstPolygon && Array.isArray(firstPolygon[0])) {
-            rawCoordinates = firstPolygon[0] || [];
-            logger.info(`   ✅ Extracted MultiPolygon: ${rawCoordinates.length} points`);
+          geometryType = 'MultiPolygon';
+          // Process each polygon in the MultiPolygon
+          for (const polygon of geojson.coordinates) {
+            if (polygon && Array.isArray(polygon[0])) {
+              const outerRing = polygon[0]; // First ring is outer boundary
+              allPolygons.push(outerRing);
+              // Calculate bounding box from all coordinates
+              outerRing.forEach((coord: any) => {
+                const lon = typeof coord[0] === 'number' ? coord[0] : parseFloat(String(coord[0]));
+                const lat = typeof coord[1] === 'number' ? coord[1] : parseFloat(String(coord[1]));
+                if (!isNaN(lon) && !isNaN(lat)) {
+                  minLon = Math.min(minLon, lon);
+                  maxLon = Math.max(maxLon, lon);
+                  minLat = Math.min(minLat, lat);
+                  maxLat = Math.max(maxLat, lat);
+                }
+              });
+            }
           }
+          logger.info(`   ✅ Extracted MultiPolygon: ${allPolygons.length} polygons`);
         } 
         // Handle Polygon: coordinates[0] is the outer ring
         else if (geojson.type === 'Polygon' && Array.isArray(geojson.coordinates)) {
-          rawCoordinates = geojson.coordinates[0] || [];
-          logger.info(`   ✅ Extracted Polygon: ${rawCoordinates.length} points`);
+          geometryType = 'Polygon';
+          const outerRing = geojson.coordinates[0] || [];
+          allPolygons.push(outerRing);
+          // Calculate bounding box
+          outerRing.forEach((coord: any) => {
+            const lon = typeof coord[0] === 'number' ? coord[0] : parseFloat(String(coord[0]));
+            const lat = typeof coord[1] === 'number' ? coord[1] : parseFloat(String(coord[1]));
+            if (!isNaN(lon) && !isNaN(lat)) {
+              minLon = Math.min(minLon, lon);
+              maxLon = Math.max(maxLon, lon);
+              minLat = Math.min(minLat, lat);
+              maxLat = Math.max(maxLat, lat);
+            }
+          });
+          logger.info(`   ✅ Extracted Polygon: ${outerRing.length} points`);
         }
         // Handle LineString or other types
         else if (Array.isArray(geojson.coordinates) && geojson.coordinates.length > 0) {
           const firstCoord = geojson.coordinates[0];
           if (Array.isArray(firstCoord) && typeof firstCoord[0] === 'number') {
-            rawCoordinates = geojson.coordinates as number[][];
-            logger.info(`   ✅ Extracted LineString/other: ${rawCoordinates.length} points`);
+            allPolygons.push(geojson.coordinates as number[][]);
+            // Calculate bounding box
+            (geojson.coordinates as number[][]).forEach((coord: any) => {
+              const lon = typeof coord[0] === 'number' ? coord[0] : parseFloat(String(coord[0]));
+              const lat = typeof coord[1] === 'number' ? coord[1] : parseFloat(String(coord[1]));
+              if (!isNaN(lon) && !isNaN(lat)) {
+                minLon = Math.min(minLon, lon);
+                maxLon = Math.max(maxLon, lon);
+                minLat = Math.min(minLat, lat);
+                maxLat = Math.max(maxLat, lat);
+              }
+            });
+            logger.info(`   ✅ Extracted LineString/other: ${geojson.coordinates.length} points`);
           }
         }
       } catch (geoError: any) {
@@ -910,7 +956,7 @@ If the tool fails to find the location, it will return success: false with error
       }
 
       // Require geojson coordinates - do not fallback to bounding box (it has too few points)
-      if (rawCoordinates.length === 0) {
+      if (allPolygons.length === 0) {
         logger.error(`   ❌ Failed to extract coordinates from geojson for location:`, cleanParams);
         return JSON.stringify({
           success: false,
@@ -923,55 +969,70 @@ If the tool fails to find the location, it will return success: false with error
           ],
         }, null, 2);
       }
-
-      // Calculate bounding box from geojson coordinates (for reference only, not for polygon)
-      // This gives us min/max lat/lon from the actual polygon coordinates
-      let minLat = Infinity, maxLat = -Infinity, minLon = Infinity, maxLon = -Infinity;
-      rawCoordinates.forEach((coord: any) => {
-        const lon = typeof coord[0] === 'number' ? coord[0] : parseFloat(String(coord[0]));
-        const lat = typeof coord[1] === 'number' ? coord[1] : parseFloat(String(coord[1]));
-        if (!isNaN(lon) && !isNaN(lat)) {
-          minLon = Math.min(minLon, lon);
-          maxLon = Math.max(maxLon, lon);
-          minLat = Math.min(minLat, lat);
-          maxLat = Math.max(maxLat, lat);
-        }
-      });
       
       // If no valid coordinates found, use defaults
       if (minLat === Infinity) {
         minLat = maxLat = minLon = maxLon = 0;
       }
 
-      // Convert coordinates to simplify-js format: {x, y}
-      // Note: OpenStreetMap uses [longitude, latitude] format
-      const points = rawCoordinates.map((coord: any) => ({ 
-        x: parseFloat(coord[0]), // longitude
-        y: parseFloat(coord[1])  // latitude
-      }));
-
-      logger.info(`   📊 Original polygon has ${points.length} points`);
-
-      // Simplify polygon using simplify-js
-      // tolerance: higher value = fewer points (0.01 degrees ≈ 1km, 0.1 degrees ≈ 11km)
-      // highQuality: true = better quality but slower
+      // Simplify each polygon separately and build WKT format
       const tolerance = 0.05; // Adjust this value to control simplification level
-      const simplifiedPoints = simplify(points, tolerance, true);
+      const allSimplifiedPolygons: Array<Array<{x: number, y: number}>> = [];
+      let totalOriginalPoints = 0;
+      let totalSimplifiedPoints = 0;
 
-      logger.info(`   ✂️  Simplified polygon to ${simplifiedPoints.length} points (tolerance: ${tolerance})`);
+      for (const polygon of allPolygons) {
+        // Convert coordinates to simplify-js format: {x, y}
+        // Note: OpenStreetMap uses [longitude, latitude] format
+        const points = polygon.map((coord: any) => ({ 
+          x: parseFloat(coord[0]), // longitude
+          y: parseFloat(coord[1])  // latitude
+        }));
 
-      // Convert back to [lon, lat] format and then to PostgreSQL POLYGON string
-      const polygonString = simplifiedPoints
-        .map((p: any) => `${p.x} ${p.y}`) // Format: "lon lat"
-        .join(', ');
+        totalOriginalPoints += points.length;
 
-      const postgresPolygon = `POLYGON((${polygonString}))`;
+        // Simplify polygon using simplify-js
+        // tolerance: higher value = fewer points (0.01 degrees ≈ 1km, 0.1 degrees ≈ 11km)
+        // highQuality: true = better quality but slower
+        const simplifiedPoints = simplify(points, tolerance, true);
+        allSimplifiedPolygons.push(simplifiedPoints);
+        totalSimplifiedPoints += simplifiedPoints.length;
+      }
+
+      logger.info(`   📊 Original polygons have ${totalOriginalPoints} total points`);
+      logger.info(`   ✂️  Simplified polygons to ${totalSimplifiedPoints} total points (tolerance: ${tolerance})`);
+
+      // Build PostgreSQL WKT format
+      let postgresPolygon: string;
+      let allCoordinates: number[][];
+      
+      if (geometryType === 'MultiPolygon') {
+        // Build MULTIPOLYGON WKT format: MULTIPOLYGON(((lon1 lat1, lon2 lat2, ...)), ((lon1 lat1, ...)))
+        const polygonStrings = allSimplifiedPolygons.map(points => {
+          const pointString = points.map((p: any) => `${p.x} ${p.y}`).join(', ');
+          return `((${pointString}))`;
+        });
+        postgresPolygon = `MULTIPOLYGON(${polygonStrings.join(', ')})`;
+        // Flatten all coordinates for response
+        allCoordinates = allSimplifiedPolygons.flatMap(points => 
+          points.map((p: any) => [p.x, p.y])
+        );
+      } else {
+        // Single polygon - use POLYGON format
+        const simplifiedPoints = allSimplifiedPolygons[0];
+        const polygonString = simplifiedPoints
+          .map((p: any) => `${p.x} ${p.y}`) // Format: "lon lat"
+          .join(', ');
+        postgresPolygon = `POLYGON((${polygonString}))`;
+        allCoordinates = simplifiedPoints.map((p: any) => [p.x, p.y]);
+      }
 
       const locationDesc = locationName;
-      logger.info(`   ✅ Generated POLYGON for ${locationDesc}`);
+      const geometryTypeName = geometryType === 'MultiPolygon' ? 'MULTIPOLYGON' : 'POLYGON';
+      logger.info(`   ✅ Generated ${geometryTypeName} for ${locationDesc}`);
       logger.info(`   Bounding Box: [${minLat}, ${maxLat}, ${minLon}, ${maxLon}]`);
-      logger.info(`   Points: ${points.length} → ${simplifiedPoints.length} (simplified)`);
-      logger.info(`   POLYGON: ${postgresPolygon.substring(0, 100)}...`);
+      logger.info(`   Points: ${totalOriginalPoints} → ${totalSimplifiedPoints} (simplified)`);
+      logger.info(`   ${geometryTypeName}: ${postgresPolygon.substring(0, 100)}...`);
 
       // Return structured JSON response for easier LLM handling
       return JSON.stringify({
@@ -985,19 +1046,21 @@ If the tool fails to find the location, it will return success: false with error
           max_longitude: maxLon,
         },
         polygon: {
+          geometry_type: geometryType, // 'Polygon' or 'MultiPolygon'
           postgres_format: postgresPolygon,
           points_count: {
-            original: points.length,
-            simplified: simplifiedPoints.length,
+            original: totalOriginalPoints,
+            simplified: totalSimplifiedPoints,
+            polygons_count: allSimplifiedPolygons.length,
           },
-          coordinates: simplifiedPoints.map((p: any) => [p.x, p.y]), // [longitude, latitude] pairs
+          coordinates: allCoordinates, // [longitude, latitude] pairs
         },
         usage: {
           sql_example: `WHERE ST_Contains(
               ST_GeomFromText('${postgresPolygon}', 4326),
               ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)
           )`,
-          note: "Use the polygon.postgres_format field directly in your SQL query with ST_Contains or ST_Within",
+          note: "Use the polygon.postgres_format field directly in your SQL query with ST_Contains or ST_Within. The format may be POLYGON or MULTIPOLYGON depending on the location.",
         },
       }, null, 2);
     } catch (error: any) {

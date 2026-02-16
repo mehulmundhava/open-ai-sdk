@@ -81,7 +81,8 @@ Important Field Notes:
 Geographic Query Patterns:
 - For device_current_data queries: Use cd.longitude and cd.latitude
 - For journey/geofencing queries: JOIN facilities table and use f.longitude and f.latitude
-- Always use ST_GeomFromText with POLYGON coordinates for geographic filtering
+- Always use ST_GeomFromText with POLYGON or MULTIPOLYGON coordinates for geographic filtering
+- The get_area_bounds tool may return MULTIPOLYGON for locations with multiple disconnected areas (e.g., countries with islands like Mexico)
 - NEVER use placeholder text like "...coordinates..." - ALWAYS use actual numeric coordinates
 
 Geographic Boundary Tool (get_area_bounds):
@@ -97,9 +98,10 @@ Geographic Boundary Tool (get_area_bounds):
   * "shipments in California" → get_area_bounds({ state: "California" })
   * "facilities in New York" → get_area_bounds({ city: "New York" }) or { state: "New York" }
   * "journeys in Mexico" → get_area_bounds({ country: "Mexico" })
-- The tool returns JSON with polygon.postgres_format field - use this directly in SQL queries
+- The tool returns JSON with polygon.postgres_format field which may be POLYGON or MULTIPOLYGON format - use this directly in SQL queries
+- For locations with multiple disconnected areas (e.g., Mexico with mainland and islands), the tool returns MULTIPOLYGON which includes all regions for accurate results
 - If the tool fails, try using the known coordinates below, or inform the user that the area boundary could not be determined
-- NEVER generate POLYGON coordinates yourself unless the tool fails - always try the tool first with proper parameters
+- NEVER generate POLYGON/MULTIPOLYGON coordinates yourself unless the tool fails - always try the tool first with proper parameters
 
 Geographic Coordinate Reference (fallback if get_area_bounds fails):
 - Mexico bounding box: POLYGON((-118.4 14.5, -86.8 14.5, -86.8 32.7, -118.4 32.7, -118.4 14.5))
@@ -154,10 +156,10 @@ CRITICAL: device_geofencings table does NOT have latitude/longitude fields. For 
   * Countries: get_area_bounds({ country: "United States" })
   * States: get_area_bounds({ state: "California" })
   * Cities: get_area_bounds({ city: "New York" })
-- Parse the JSON response and extract polygon.postgres_format field
-- Example with geographic filter (using POLYGON from get_area_bounds tool):
+- Parse the JSON response and extract polygon.postgres_format field (may be POLYGON or MULTIPOLYGON format)
+- Example with geographic filter (using POLYGON or MULTIPOLYGON from get_area_bounds tool):
   WHERE ST_Contains(
-      ST_GeomFromText('POLYGON((...))', 4326),  -- Use polygon.postgres_format from get_area_bounds tool response
+      ST_GeomFromText('POLYGON((...))', 4326),  -- or MULTIPOLYGON(((...)), ((...))) - Use polygon.postgres_format from get_area_bounds tool response
       ST_SetSRID(ST_MakePoint(f.longitude, f.latitude), 4326)
   )
 `;

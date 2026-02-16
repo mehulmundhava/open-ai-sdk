@@ -27,6 +27,25 @@ function stripLocalhostFromCsvLinks(text: string): string {
 }
 
 /**
+ * Normalize SQL query by removing line breaks and extra whitespace
+ * Makes the query executable in adminer.php and other SQL tools
+ */
+function normalizeSqlQuery(sqlQuery: string | undefined): string | undefined {
+  if (!sqlQuery) return undefined;
+  
+  // Replace line breaks (\n, \r\n, \r) with spaces
+  let normalized = sqlQuery.replace(/\r\n/g, ' ').replace(/\n/g, ' ').replace(/\r/g, ' ');
+  
+  // Replace multiple consecutive spaces with a single space
+  normalized = normalized.replace(/\s+/g, ' ');
+  
+  // Trim leading and trailing whitespace
+  normalized = normalized.trim();
+  
+  return normalized;
+}
+
+/**
  * Process chat request and return response
  */
 export async function processChat(
@@ -167,11 +186,14 @@ export async function processChat(
     // Process answer to strip localhost URLs (already done in agentResponseProcessor, but double-check)
     const processedAnswer = stripLocalhostFromCsvLinks(result.answer);
 
+    // Normalize SQL query (remove line breaks and extra whitespace)
+    const normalizedSqlQuery = normalizeSqlQuery(result.sqlQuery);
+
     // Build response
     const response: ChatResponse = {
       token_id: payload.token_id,
       answer: processedAnswer,
-      sql_query: result.sqlQuery,
+      sql_query: normalizedSqlQuery,
       results: result.queryResult ? { raw: result.queryResult } : undefined,
       llm_used: true,
       llm_type: 'OPENAI/gpt-4o',
@@ -194,7 +216,7 @@ export async function processChat(
         tool_calls_count: result.toolCalls?.length || 0,
         tool_errors: result.toolErrors,
         tool_errors_count: result.toolErrors?.length || 0,
-        sql_query: result.sqlQuery,
+        sql_query: normalizedSqlQuery,
         execute_db_query: executeDbQuerySql || journeyToolSql || undefined, // SQL query executed via execute_db_query or journey tools
         query_result: result.queryResult,
         conversation: {
@@ -209,7 +231,7 @@ export async function processChat(
     if (result.toolErrors && result.toolErrors.length > 0) {
       requestLogger.error('❌ Tool errors detected:', {
         errors: result.toolErrors,
-        sql_query: result.sqlQuery,
+        sql_query: normalizedSqlQuery,
         tool_calls: result.toolCalls,
       });
     }
