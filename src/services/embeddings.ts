@@ -77,6 +77,16 @@ export async function embedQuery(query: string): Promise<number[]> {
         input: query,
       });
 
+      // Log token usage if available
+      if (response.usage) {
+        logger.info(`📊 OpenAI Embedding Token Usage:`, {
+          model: modelName,
+          prompt_tokens: response.usage.prompt_tokens,
+          total_tokens: response.usage.total_tokens,
+          query_length: query.length,
+        });
+      }
+
       // OpenAI returns normalized embeddings by default
       const embedding = response.data[0].embedding;
       return embedding;
