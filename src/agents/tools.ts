@@ -955,7 +955,7 @@ If the tool fails to find the location, it will return success: false with error
       // Simplify polygon using simplify-js
       // tolerance: higher value = fewer points (0.01 degrees ≈ 1km, 0.1 degrees ≈ 11km)
       // highQuality: true = better quality but slower
-      const tolerance = 0.001; // Adjust this value to control simplification level
+      const tolerance = 0.05; // Adjust this value to control simplification level
       const simplifiedPoints = simplify(points, tolerance, true);
 
       logger.info(`   ✂️  Simplified polygon to ${simplifiedPoints.length} points (tolerance: ${tolerance})`);
