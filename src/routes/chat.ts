@@ -63,7 +63,14 @@ declare global {
 
 router.post('/', async (req: Request, res: Response) => {
   try {
+    const chatId = req.params.chatId;
     const payload: ChatRequest = req.body;
+
+    if (!chatId) {
+      return res.status(400).json({
+        error: 'Missing required parameter: chatId',
+      });
+    }
 
     if (!payload.token_id || !payload.question) {
       return res.status(400).json({
@@ -78,7 +85,7 @@ router.post('/', async (req: Request, res: Response) => {
       });
     }
 
-    const response: ChatResponse = await processChat(payload, vectorStore);
+    const response: ChatResponse = await processChat(chatId, payload, vectorStore);
 
     // Final safety: strip localhost from any download-csv links before sending (mutates response in place)
     stripLocalhostFromResponse(response);

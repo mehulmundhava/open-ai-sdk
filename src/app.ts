@@ -4,6 +4,8 @@ import { VectorStoreService } from './services/vectorStore';
 import { initializeEmbeddings } from './services/embeddings';
 import { logger } from './utils/logger';
 import { settings } from './config/settings';
+// Import models to ensure they are initialized
+import './models';
 
 // Import routes
 import chatRouter from './routes/chat';
@@ -11,6 +13,7 @@ import vectorSearchRouter from './routes/vectorSearch';
 import embeddingsRouter from './routes/embeddings';
 import csvDownloadRouter from './routes/csvDownload';
 import healthRouter from './routes/health';
+import aiChatRouter from './routes/aiChat';
 
 const app: Express = express();
 
@@ -65,10 +68,11 @@ async function initializeServices() {
 
 // Register routes
 app.use('/health', healthRouter);
-app.use('/chat', chatRouter);
+app.use('/chat/:chatId/message', chatRouter);
 app.use('/vector-search', vectorSearchRouter);
 app.use('/', embeddingsRouter); // Embeddings routes are at root level (e.g., /reload-vector-store, /generate-embeddings-examples)
 app.use('/download-csv', csvDownloadRouter);
+app.use('/ai-chat', aiChatRouter);
 
 // Root endpoint
 app.get('/', (req: Request, res: Response) => {
@@ -85,6 +89,7 @@ app.get('/', (req: Request, res: Response) => {
       searchEmbedding: '/search-embedding',
       downloadCSV: '/download-csv/:csvId',
       health: '/health',
+      aiChat: '/ai-chat',
     },
   });
 });

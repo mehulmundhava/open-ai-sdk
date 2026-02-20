@@ -5,6 +5,7 @@ import { securityCheck } from '../utils/securityCheck';
 import { TokenTracker } from '../utils/tokenTracker';
 import { logger, createRequestLogger } from '../utils/logger';
 import { v4 as uuidv4 } from 'uuid';
+import { AiChat, AiChatMessage } from '../models';
 
 /** Strip localhost or any origin from download-csv URLs so response never exposes API base URL. */
 function stripLocalhostFromCsvLinks(text: string): string {
@@ -49,20 +50,41 @@ function normalizeSqlQuery(sqlQuery: string | undefined): string | undefined {
  * Process chat request and return response
  */
 export async function processChat(
+  chatId: string,
   payload: ChatRequest,
   vectorStore: VectorStoreService
 ): Promise<ChatResponse> {
   const requestId = uuidv4();
-  const requestLogger = createRequestLogger(requestId, payload.user_id);
+
+  // Fetch chat entry to get user_id
+  let chatEntry;
+  try {
+    chatEntry = await AiChat.findByPk(chatId);
+    if (!chatEntry) {
+      throw new Error(`Chat entry not found for chatId: ${chatId}`);
+    }
+  } catch (error: any) {
+    logger.error(`❌ Error fetching chat entry: ${error?.message}`);
+    return {
+      token_id: payload.token_id,
+      answer: `Error: Chat entry not found. Please create a new chat entry first.`,
+      llm_used: false,
+      error: error?.message || 'Chat entry not found',
+    };
+  }
+
+  const userId = String(chatEntry.user_id);
+  const isFirstMessage = chatEntry.last_message_at === null;
+  const requestLogger = createRequestLogger(requestId, userId);
 
   // Log comprehensive conversation start
   requestLogger.info('💬 CONVERSATION REQUEST', {
     requestId,
-    userId: payload.user_id,
+    chatId,
+    userId,
+    isFirstMessage,
     question: payload.question,
     questionLength: payload.question.length,
-    chatHistoryLength: payload.chat_history?.length || 0,
-    chatHistory: payload.chat_history,
     timestamp: new Date().toISOString(),
   });
 
@@ -73,17 +95,18 @@ export async function processChat(
 
   // Security check for non-admin users
   let securityFailureReason: string | undefined;
-  if (payload.user_id && payload.user_id.toLowerCase() !== 'admin') {
+  if (userId && userId.toLowerCase() !== 'admin') {
     try {
-      const securityResult = await securityCheck(payload.question, payload.user_id);
+      const securityResult = await securityCheck(payload.question, userId);
       if (!securityResult.allowed) {
         securityFailureReason = securityResult.reason || 'Query blocked by security check';
         requestLogger.warn(`🔒 Security check BLOCKED query`, {
-          userId: payload.user_id,
+          userId,
           question: payload.question,
           reason: securityFailureReason,
         });
-        return {
+        
+        const securityBlockedResponse: ChatResponse = {
           token_id: payload.token_id,
           answer: `Sorry, I cannot process that request. ${securityFailureReason}`,
           security_failure_reason: securityFailureReason,
@@ -95,13 +118,36 @@ export async function processChat(
               blocked: true,
               reason: securityFailureReason,
               question: payload.question,
-              userId: payload.user_id,
+              userId,
             },
           },
         };
+
+        // Save security blocked message to database
+        try {
+          await AiChatMessage.create({
+            chat_id: chatId,
+            user_id: chatEntry.user_id,
+            user_message: payload.question,
+            response_message: securityBlockedResponse.answer,
+            response: securityBlockedResponse, // Full response object as JSONB
+            token_consumption: null, // No token consumption for blocked requests
+          });
+          requestLogger.info('✅ Saved security blocked message to database', {
+            chatId,
+          });
+        } catch (saveError: any) {
+          requestLogger.error('⚠️  Failed to save security blocked message to database:', {
+            error: saveError?.message,
+            chatId,
+          });
+          // Continue even if save fails
+        }
+
+        return securityBlockedResponse;
       } else {
         requestLogger.info(`✅ Security check ALLOWED query`, {
-          userId: payload.user_id,
+          userId,
           question: payload.question,
           reason: securityResult.reason,
         });
@@ -113,33 +159,48 @@ export async function processChat(
   }
 
   // Initialize token tracker
-  const tokenTracker = new TokenTracker(requestId, payload.user_id);
+  const tokenTracker = new TokenTracker(requestId, userId);
 
   try {
     // Create chat agent
     const agent = await createChatAgent({
-      userId: payload.user_id,
+      userId,
       topK: 20,
       vectorStore,
     });
 
-    // Run agent
+    // Run agent with conversation session
     const startTime = Date.now();
     const result = await runChatAgent(
       agent,
       payload.question,
-      payload.user_id || 'admin',
+      userId,
       vectorStore,
-      tokenTracker
+      tokenTracker,
+      chatId, // conversationId
+      isFirstMessage // include static content only on first message
     );
     const elapsedTime = Date.now() - startTime;
+
+    // Update last_message_at after processing
+    try {
+      await chatEntry.update({
+        last_message_at: new Date(),
+      });
+      requestLogger.info('✅ Updated last_message_at for chat entry');
+    } catch (updateError: any) {
+      requestLogger.error(`⚠️  Failed to update last_message_at: ${updateError?.message}`);
+      // Continue even if update fails
+    }
 
     requestLogger.info(`[chat] agent done in ${elapsedTime}ms`);
 
     // Log comprehensive conversation summary
     requestLogger.info('💬 CONVERSATION SUMMARY', {
       requestId,
-      userId: payload.user_id,
+      chatId,
+      userId,
+      isFirstMessage,
       question: payload.question,
       answer: result.answer.substring(0, 200),
       sqlQuery: result.sqlQuery,
@@ -246,6 +307,28 @@ export async function processChat(
       });
     }
 
+    // Save chat message to database before returning response
+    try {
+      await AiChatMessage.create({
+        chat_id: chatId,
+        user_id: chatEntry.user_id,
+        user_message: payload.question,
+        response_message: processedAnswer,
+        response: response, // Full response object as JSONB
+        token_consumption: result.tokenUsage || null, // Token usage data as JSONB
+      });
+      requestLogger.info('✅ Saved chat message to database', {
+        chatId,
+        messageId: 'saved',
+      });
+    } catch (saveError: any) {
+      requestLogger.error('⚠️  Failed to save chat message to database:', {
+        error: saveError?.message,
+        chatId,
+      });
+      // Continue even if save fails - don't block the response
+    }
+
     return response;
   } catch (error: any) {
     const errorDetails = {
@@ -255,8 +338,8 @@ export async function processChat(
     };
     requestLogger.error('❌ Error processing chat:', errorDetails);
     
-    // Return error response instead of throwing
-    return {
+    // Build error response
+    const errorResponse: ChatResponse = {
       token_id: payload.token_id,
       answer: `I encountered an error while processing your request: ${errorDetails.message}. Please check the logs for more details.`,
       llm_used: false,
@@ -266,5 +349,30 @@ export async function processChat(
         error: errorDetails,
       },
     };
+
+    // Save error message to database if chatEntry is available
+    if (chatEntry) {
+      try {
+        await AiChatMessage.create({
+          chat_id: chatId,
+          user_id: chatEntry.user_id,
+          user_message: payload.question,
+          response_message: errorResponse.answer,
+          response: errorResponse, // Full error response object as JSONB
+          token_consumption: null, // No token consumption for errors
+        });
+        requestLogger.info('✅ Saved error chat message to database', {
+          chatId,
+        });
+      } catch (saveError: any) {
+        requestLogger.error('⚠️  Failed to save error chat message to database:', {
+          error: saveError?.message,
+          chatId,
+        });
+        // Continue even if save fails
+      }
+    }
+
+    return errorResponse;
   }
 }

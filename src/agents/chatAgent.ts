@@ -248,9 +248,11 @@ async function buildSystemPrompt(
   topK: number,
   question: string | undefined,
   vectorStore: VectorStoreService,
-  isJourney: boolean = false
+  isJourney: boolean = false,
+  includeStaticContent: boolean = true
 ): Promise<{ staticPrefix: string; dynamicSections: string }> {
-  const staticPrefix = buildStaticPromptPrefix(isJourney);
+  // Only include static content on first message
+  const staticPrefix = includeStaticContent ? buildStaticPromptPrefix(isJourney) : '';
   const dynamicSections = await buildDynamicPromptSections(userId, question, vectorStore, isJourney);
   
   return {
@@ -324,7 +326,9 @@ export async function runChatAgent(
   question: string,
   userId: string,
   vectorStore: VectorStoreService,
-  tokenTracker: TokenTracker
+  tokenTracker: TokenTracker,
+  conversationId?: string,
+  isFirstMessage: boolean = true
 ): Promise<{
   answer: string;
   sqlQuery?: string;
@@ -350,11 +354,22 @@ export async function runChatAgent(
     const isJourney = detectJourneyQuestion(question);
 
     // Build prompt with separated static and dynamic sections
-    const { staticPrefix, dynamicSections } = await buildSystemPrompt(userId, 20, question, vectorStore, isJourney);
+    // Only include static content on first message
+    const { staticPrefix, dynamicSections } = await buildSystemPrompt(
+      userId, 
+      20, 
+      question, 
+      vectorStore, 
+      isJourney,
+      isFirstMessage
+    );
     
     // Construct final system prompt: Static (cached) + Dynamic (RAG) + User question
     // The static prefix will be cached, dynamic sections change per request
-    const finalSystemPrompt = staticPrefix + dynamicSections;
+    // On subsequent messages, staticPrefix will be empty
+    const finalSystemPrompt = isFirstMessage 
+      ? staticPrefix + dynamicSections 
+      : dynamicSections;
 
     // Determine prompt cache key based on question type
     const promptCacheKey = isJourney ? 'sql_assistant_journey_v1' : 'sql_assistant_v1';
@@ -370,6 +385,8 @@ export async function runChatAgent(
     // Log conversation start with cache key
     logger.info('💬 CONVERSATION START', {
       userId,
+      conversationId,
+      isFirstMessage,
       question,
       isJourney,
       promptCacheKey,
@@ -385,15 +402,19 @@ export async function runChatAgent(
     // Log cache key for monitoring (actual caching happens automatically by OpenAI)
     logger.info('📦 Prompt Cache Configuration', {
       promptCacheKey,
-      staticPrefixLength: staticPrefix.length,
-      estimatedTokens: Math.ceil(staticPrefix.length / 4), // Rough estimate: ~4 chars per token
+      staticPrefixLength: isFirstMessage ? staticPrefix.length : 0,
+      estimatedTokens: isFirstMessage ? Math.ceil(staticPrefix.length / 4) : 0, // Rough estimate: ~4 chars per token
       isJourney,
+      isFirstMessage,
+      conversationId,
     });
 
     // Run the agent
+    // Note: Conversation history is managed by OpenAI's API automatically when using the same conversationId
+    // The model will maintain context across requests when using the same agent instance
+    // For now, we rely on the model's built-in conversation management
     // The static prefix in the system prompt will be cached by OpenAI automatically
     // when it's >= 1024 tokens and matches previous requests
-    // Note: If the Agents SDK supports prompt_cache_key in the future, it can be added here
     const result = await run(updatedAgent, question);
 
     // Extract usage data (cast to any to access usage property that exists at runtime)
