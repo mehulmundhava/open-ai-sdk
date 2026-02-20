@@ -734,7 +734,7 @@ If the tool fails to find the location, it will return success: false with error
     postalcode: z.string().nullable().optional().describe('Postal/ZIP code'),
     q: z.string().nullable().optional().describe('General query string (use as fallback if specific parameters not available)'),
     countrycodes: z.string().nullable().optional().describe('ISO 3166-1alpha2 country codes (e.g., "us", "mx", "in")'),
-    polygon_threshold: z.number().nullable().optional().describe('Polygon simplification threshold (0.0-1.0, default: 0.5)'),
+    polygon_threshold: z.number().nullable().optional().describe('Polygon simplification threshold (0.0-1.0, default: 0.1)'),
     limit: z.number().nullable().optional().describe('Maximum number of results (default: 1)'),
   }),
   execute: async (params: {
