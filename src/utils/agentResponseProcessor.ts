@@ -512,7 +512,7 @@ export class AgentResponseProcessor {
           : '0%';
       }
       
-      logger.info(`💰 Token usage [${stage}]:`, logData);
+      logger.debug(`Token usage [${stage}]:`, logData);
       return true;
     } catch (error) {
       logger.warn(`⚠️  Failed to parse usage for ${stage}:`, error);
@@ -525,32 +525,17 @@ export class AgentResponseProcessor {
    */
   private extractTokensFromModelResponses(modelResponses: any[]): boolean {
     let extracted = false;
-    logger.info(`🔍 Extracting tokens from ${modelResponses.length} model responses`);
-    
+    logger.debug(`Extracting tokens from ${modelResponses.length} model responses`);
+
     for (let i = 0; i < modelResponses.length; i++) {
       const response = modelResponses[i];
-      
-      // Check providerData.usage first (contains detailed usage with cached_tokens)
-      // This is the most important source for cached_tokens
+
       if (response?.providerData?.usage) {
-        const usage = response.providerData.usage;
-        logger.info(`📊 Found providerData.usage in model_response[${i}]`, {
-          prompt_tokens: usage.prompt_tokens,
-          cached_tokens: usage.prompt_tokens_details?.cached_tokens || 0
-        });
-        if (this.recordTokenUsage(`model_response_${i}_provider`, usage)) {
+        if (this.recordTokenUsage(`model_response_${i}_provider`, response.providerData.usage)) {
           extracted = true;
-          // Log if we found cached_tokens
-          const cachedTokens = usage.prompt_tokens_details?.cached_tokens || 0;
-          if (cachedTokens > 0) {
-            logger.info(`✅ Found cached_tokens in model_response_${i}_provider: ${cachedTokens}`);
-          }
         }
       }
-      
-      // Also check direct usage property (fallback)
       if (response?.usage) {
-        logger.info(`📊 Found direct usage in model_response[${i}]`);
         if (this.recordTokenUsage(`model_response_${i}`, response.usage)) {
           extracted = true;
         }
@@ -628,35 +613,20 @@ export class AgentResponseProcessor {
       0
     );
 
-    // Log cached tokens benefit
-    if (totalCachedTokens > 0) {
-      logger.info(`📦 Performance: ${totalCachedTokens} tokens saved via prompt cache`, {
-        cachedTokens: totalCachedTokens,
-        totalPromptTokens: totalUsage.promptTokens,
-        cacheHitRate: totalUsage.promptTokens > 0 
-          ? `${((totalCachedTokens / totalUsage.promptTokens) * 100).toFixed(2)}%`
-          : '0%',
-      });
-    }
-
-    logger.info('💰 Token Usage Summary:', {
-      total: {
-        promptTokens: totalUsage.promptTokens,
-        completionTokens: totalUsage.completionTokens,
-        totalTokens: totalUsage.totalTokens,
-        cachedTokens: totalCachedTokens,
-      },
-      stages: report.stages.map(s => ({
-        stage: s.stage,
-        promptTokens: s.tokens.promptTokens,
-        completionTokens: s.tokens.completionTokens,
-        totalTokens: s.tokens.totalTokens,
-        cachedTokens: s.tokens.cachedTokens || 0,
-      })),
-      toolCallsCount: toolCalls.length,
-      requestDuration: report.endTime && report.startTime 
-        ? `${((report.endTime - report.startTime) / 1000).toFixed(2)}s`
-        : 'N/A',
+    const durationS = report.endTime && report.startTime
+      ? ((report.endTime - report.startTime) / 1000).toFixed(2)
+      : 'N/A';
+    const cacheNote = totalCachedTokens > 0
+      ? ` cached=${totalCachedTokens}`
+      : '';
+    logger.info('💰 Tokens:', {
+      prompt: totalUsage.promptTokens,
+      completion: totalUsage.completionTokens,
+      total: totalUsage.totalTokens,
+      stages: report.stages.length,
+      toolCalls: toolCalls.length,
+      duration: `${durationS}s`,
+      ...(totalCachedTokens > 0 && { cachedTokens: totalCachedTokens }),
     });
   }
 

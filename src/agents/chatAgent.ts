@@ -71,6 +71,7 @@ Table Relationships and Structure:
 - incoming_message_history_k (IK): Contains historical location and sensor data with timestamps.
 - sensor (S): Contains sensor data history for temperature and battery.
 - shock_info: Contains shock and free-fall event data.
+- area_bounds (ab): Stores geographic boundaries (polygon/multipolygon) for locations. Populated by get_area_bounds tool. Has id (PRIMARY KEY), area_name, boundary (geometry). For geographic filtering use the area_bound_id returned by get_area_bounds: JOIN area_bounds ab ON ab.id = <area_bound_id> and WHERE ST_Contains(ab.boundary, ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)).
 
 Important Field Notes:
 - Temperature values are stored in degrees Celsius (°C)
@@ -81,9 +82,8 @@ Important Field Notes:
 Geographic Query Patterns:
 - For device_current_data queries: Use cd.longitude and cd.latitude
 - For journey/geofencing queries: JOIN facilities table and use f.longitude and f.latitude
-- Always use ST_GeomFromText with POLYGON or MULTIPOLYGON coordinates for geographic filtering
-- The get_area_bounds tool may return MULTIPOLYGON for locations with multiple disconnected areas (e.g., countries with islands like Mexico)
-- NEVER use placeholder text like "...coordinates..." - ALWAYS use actual numeric coordinates
+- For geographic filtering: use the area_bound_id from get_area_bounds and JOIN area_bounds (e.g. alias ab). Use ST_Contains(ab.boundary, point) - do NOT embed POLYGON or MULTIPOLYGON text in the query
+- NEVER use placeholder text like "...coordinates..." - use the area_bound_id from the tool and JOIN area_bounds
 
 Geographic Boundary Tool (get_area_bounds):
 - When user asks about a specific location (city, state, country, region), FIRST call get_area_bounds tool with STRUCTURED parameters
@@ -98,16 +98,12 @@ Geographic Boundary Tool (get_area_bounds):
   * "shipments in California" → get_area_bounds({ state: "California" })
   * "facilities in New York" → get_area_bounds({ city: "New York" }) or { state: "New York" }
   * "journeys in Mexico" → get_area_bounds({ country: "Mexico" })
-- The tool returns JSON with polygon.postgres_format field which may be POLYGON or MULTIPOLYGON format - use this directly in SQL queries
-- For locations with multiple disconnected areas (e.g., Mexico with mainland and islands), the tool returns MULTIPOLYGON which includes all regions for accurate results
-- If the tool fails, try using the known coordinates below, or inform the user that the area boundary could not be determined
-- NEVER generate POLYGON/MULTIPOLYGON coordinates yourself unless the tool fails - always try the tool first with proper parameters
+- The tool returns success, area_bound_id, and area_name. Use area_bound_id in your SQL: JOIN area_bounds ab ON ab.id = <area_bound_id> and filter with ST_Contains(ab.boundary, ST_SetSRID(ST_MakePoint(longitude, latitude), 4326))
+- If the tool fails, inform the user that the area boundary could not be determined
+- NEVER generate POLYGON/MULTIPOLYGON coordinates yourself - always use get_area_bounds and then JOIN area_bounds by id
 
-Geographic Coordinate Reference (fallback if get_area_bounds fails):
-- Mexico bounding box: POLYGON((-118.4 14.5, -86.8 14.5, -86.8 32.7, -118.4 32.7, -118.4 14.5))
-- United States bounding box: POLYGON((-124.848974 49.384358, -66.93457 49.384358, -66.93457 24.396308, -124.848974 24.396308, -124.848974 49.384358))
-- India bounding box: POLYGON((66.782749 8.047059, 97.402624 8.047059, 97.402624 37.090353, 66.782749 37.090353, 66.782749 8.047059))
-- New York approximate: POLYGON((-74.25909 40.917577, -73.950000 40.800000, -73.700272 40.477399, -74.25909 40.477399, -74.25909 40.917577))
+Geographic fallback (only if get_area_bounds fails and you cannot use area_bounds):
+- Use a simple bounding box POLYGON only when the tool fails and no area_bound_id is available (e.g. Mexico: POLYGON((-118.4 14.5, -86.8 14.5, -86.8 32.7, -118.4 32.7, -118.4 14.5)))
 
 Journey Calculation Rules:
 - Journey = device movement from one facility_id to another
@@ -121,7 +117,7 @@ SQL Query Best Practices:
 - SELECT only specific columns needed, never use SELECT *
 - For journey queries with geographic filters, include useful fields: device_id, device_name, facility_id, facility_name, facility_type, entry_event_time, exit_event_time, latitude, longitude
 - When joining device_geofencings with facilities for coordinates: LEFT JOIN facilities f ON f.facility_id = dg.facility_id
-- Use ST_Contains with ST_MakePoint(f.longitude, f.latitude) for geographic filtering on journeys
+- For geographic filtering on journeys: JOIN area_bounds ab ON ab.id = <area_bound_id from get_area_bounds> and use WHERE ST_Contains(ab.boundary, ST_SetSRID(ST_MakePoint(f.longitude, f.latitude), 4326))
 
 Error Handling Guidelines:
 - Never explain SQL/schema, table names, column names, or database structure in your answers
@@ -151,17 +147,9 @@ ORDER BY dg.entry_event_time ASC
 CRITICAL: device_geofencings table does NOT have latitude/longitude fields. For geographic filtering on journeys:
 - You MUST JOIN facilities table: LEFT JOIN facilities f ON f.facility_id = dg.facility_id
 - Use facilities.latitude and facilities.longitude (NOT device_geofencings - these columns don't exist)
-- For geographic ST_Contains filter, use: ST_MakePoint(f.longitude, f.latitude)
-- IMPORTANT: If user mentions a location, FIRST call get_area_bounds with STRUCTURED parameters:
-  * Countries: get_area_bounds({ country: "United States" })
-  * States: get_area_bounds({ state: "California" })
-  * Cities: get_area_bounds({ city: "New York" })
-- Parse the JSON response and extract polygon.postgres_format field (may be POLYGON or MULTIPOLYGON format)
-- Example with geographic filter (using POLYGON or MULTIPOLYGON from get_area_bounds tool):
-  WHERE ST_Contains(
-      ST_GeomFromText('POLYGON((...))', 4326),  -- or MULTIPOLYGON(((...)), ((...))) - Use polygon.postgres_format from get_area_bounds tool response
-      ST_SetSRID(ST_MakePoint(f.longitude, f.latitude), 4326)
-  )
+- IMPORTANT: If user mentions a location, FIRST call get_area_bounds with STRUCTURED parameters (e.g. country, state, city). Use the returned area_bound_id in your SQL.
+- For geographic filter: JOIN area_bounds ab ON ab.id = <area_bound_id> and add:
+  WHERE ST_Contains(ab.boundary, ST_SetSRID(ST_MakePoint(f.longitude, f.latitude), 4326))
 `;
   }
 
