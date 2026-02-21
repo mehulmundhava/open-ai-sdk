@@ -175,4 +175,15 @@ export const TABLE_METADATA: TableMetadata[] = [
       'time_stamp',
     ],
   },
+  {
+    name: 'area_bounds',
+    description: 'Stores geographic boundaries (polygon/multipolygon) for locations resolved by get_area_bounds tool. Use the id returned by get_area_bounds to JOIN and filter by ST_Contains(ab.boundary, point).',
+    importantFields: [
+      'id (PRIMARY KEY) - use area_bound_id from get_area_bounds tool',
+      'area_name',
+      'boundary (geometry, use with ST_Contains for geographic filter)',
+      'location_params (jsonb)',
+      'created_at',
+    ],
+  },
 ];

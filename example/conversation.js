@@ -95,51 +95,26 @@ const agent = new Agent({
 
 async function main() {
   const client = new OpenAI();
-  // const { id: conversationId } = await client.conversations.create({});
-  // console.log('conversationId:', conversationId);
+  const { id: conversationId } = await client.conversations.create({});
+  console.log('conversationId:', conversationId);
 
-  // // Single message: agent must call resolve_trip -> then get_flights and get_restaurants (planId + nextAction from 1st)
-  // console.log('\n--- Message: trip Paris (1st tool → planId/nextAction → 2nd then 3rd tool with same planId) ---');
-  // const result = await run(
-  //   agent,
-  //   'I want to go from London to Paris. I need flights and a dinner restaurant.',
-  //   { conversationId }
-  // );
-  // console.log('Final:', result.finalOutput);
+  // Single message: agent must call resolve_trip -> then get_flights and get_restaurants (planId + nextAction from 1st)
+  console.log('\n--- Message: trip Paris (1st tool → planId/nextAction → 2nd then 3rd tool with same planId) ---');
+  const result = await run(
+    agent,
+    'I want to go from London to Paris. I need flights and a dinner restaurant.',
+    { conversationId }
+  );
+  console.log('Final:', result.finalOutput);
 
-  // // Follow-up in same conversation – must also call tools (new trip = new resolve_trip → get_flights / get_restaurants)
-  // console.log('\n--- Follow-up (same conversationId, requires tool calls again) ---');
-  // const result2 = await run(
-  //   agent,
-  //   'Now plan a trip from Paris to Berlin: I need flights and a good restaurant for dinner there. which trip is better-?',
-  //   { conversationId }
-  // );
-  // console.log('Final:', result2.finalOutput);
-
-  //1st trip
-  const first = await run(agent, 'I want to go from London to Paris. I need flights and a dinner restaurant.');
-  console.log('First:', first.finalOutput);
-  let previousResponseId = first.lastResponseId;
-  //2nd trip
-  const second = await run(agent, 'Now plan a trip from Paris to Berlin: I need flights and a good restaurant for dinner there.', {
-    previousResponseId,
-  });
-  console.log('Second:', second.finalOutput);  
-  previousResponseId = second.lastResponseId;
-  //3rd trip
-  const third = await run(agent, 'Now plan a trip from Berlin to Istanbul: I need booking for a hotel.', {
-    previousResponseId,
-  });
-  console.log('Third:', third.finalOutput);
-  previousResponseId = third.lastResponseId;
-  //4rd info
-  const fourth = await run(agent, 'give list of places that i have mentioned in the trips?', {
-    previousResponseId,
-  });
-  console.log('Fourth:', fourth.finalOutput);
-  previousResponseId = fourth.lastResponseId;
-  //log history
-  // console.log('History:', first.history);
+  // Follow-up in same conversation – must also call tools (new trip = new resolve_trip → get_flights / get_restaurants)
+  console.log('\n--- Follow-up (same conversationId, requires tool calls again) ---');
+  const result2 = await run(
+    agent,
+    'Now plan a trip from Paris to Berlin: I need flights and a good restaurant for dinner there. which trip is better-?',
+    { conversationId }
+  );
+  console.log('Final:', result2.finalOutput);
 }
 
 main().catch(console.error);

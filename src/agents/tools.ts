@@ -4,7 +4,7 @@ import { DatabaseService } from '../services/database';
 import { formatResultWithCSV, formatJourneyListWithCSV } from '../utils/csvGenerator';
 import { TABLE_METADATA } from '../config/tableMetadata';
 import { logger } from '../utils/logger';
-import { sequelizeReadOnly } from '../config/database';
+import { sequelizeReadOnly, sequelizeUpdate } from '../config/database';
 import { QueryTypes } from 'sequelize';
 import {
   calculateJourneyCounts,
@@ -680,14 +680,15 @@ This tool:
 });
 
 /**
- * Get area bounds tool - fetches geographic polygon for a location from OpenStreetMap
+ * Get area bounds tool - fetches geographic polygon for a location from OpenStreetMap,
+ * stores it in area_bounds table, and returns area_bound_id for use in SQL via JOIN.
  */
 export const getAreaBoundsTool = tool({
   name: 'get_area_bounds',
-  description: `Get the geographic polygon (bounding box) for a location from OpenStreetMap.
-  
+  description: `Get the geographic boundary for a location from OpenStreetMap and get an ID to use in SQL.
+
 Use this tool when the user asks about a specific location (city, state, country, region) and you need
-to generate a POLYGON or MULTIPOLYGON for geographic filtering in SQL queries.
+geographic filtering in SQL queries.
 
 IMPORTANT: Pass structured location parameters for accurate results:
 - For countries: use { country: "United States" } or { country: "Mexico" }
@@ -702,29 +703,16 @@ Examples:
 - "facilities in New York" -> { city: "New York" } or { state: "New York" }
 - "journeys in Mexico" -> { country: "Mexico" }
 
-The tool will:
-1. Query OpenStreetMap API with proper parameters
-2. Extract all polygons from the GeoJSON response (handles both Polygon and MultiPolygon)
-3. Simplify each polygon separately to reduce complexity
-4. Return a structured JSON response with:
-   - success: boolean indicating if the operation succeeded
-   - location: the location parameters that were queried
-   - bounding_box: object with min_latitude, max_latitude, min_longitude, max_longitude
-   - polygon: object containing:
-     - geometry_type: "Polygon" or "MultiPolygon" indicating the geometry type
-     - postgres_format: the POLYGON or MULTIPOLYGON string ready for PostgreSQL (use this in SQL queries)
-     - points_count: original and simplified point counts, plus polygons_count for MultiPolygon
-     - coordinates: array of [longitude, latitude] pairs
-   - usage: SQL example showing how to use the polygon
+The tool returns:
+- success: boolean
+- area_bound_id: the primary key id to use in your SQL (use this, not polygon text)
+- area_name: human-readable location name
 
-To use the result:
-- Parse the JSON response
-- Extract polygon.postgres_format field (may be POLYGON or MULTIPOLYGON format)
-- Use it directly in your SQL query with ST_Contains or ST_Within
-- Note: For locations with multiple disconnected areas (e.g., countries with islands like Mexico), 
-  the tool returns MULTIPOLYGON format which includes all regions for accurate results
+For geographic filtering in SQL you MUST:
+1. JOIN the area_bounds table (e.g. alias 'ab') and filter by the returned id: JOIN area_bounds ab ON ab.id = <area_bound_id>
+2. Use ST_Contains(ab.boundary, ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)) in WHERE - do NOT paste polygon or MULTIPOLYGON text into the query.
 
-If the tool fails to find the location, it will return success: false with error details and suggestions.`,
+If the tool fails, it returns success: false with error and suggestions.`,
   parameters: z.object({
     country: z.string().nullable().optional().describe('Country name (e.g., "United States", "Mexico", "India")'),
     state: z.string().nullable().optional().describe('State/Province name (e.g., "California", "Texas", "New York")'),
@@ -975,32 +963,52 @@ If the tool fails to find the location, it will return success: false with error
         minLat = maxLat = minLon = maxLon = 0;
       }
 
-      // Simplify each polygon separately and build WKT format
-      const tolerance = 0.05; // Adjust this value to control simplification level
+      // Per-polygon dynamic tolerance: small areas (e.g. city) get small tolerance, large areas (e.g. country) get larger
+      const TOLERANCE_MIN = 0.0001;
+      const TOLERANCE_MAX = 0.15;
       const allSimplifiedPolygons: Array<Array<{x: number, y: number}>> = [];
+      const tolerancesUsed: number[] = [];
       let totalOriginalPoints = 0;
       let totalSimplifiedPoints = 0;
 
-      for (const polygon of allPolygons) {
-        // Convert coordinates to simplify-js format: {x, y}
-        // Note: OpenStreetMap uses [longitude, latitude] format
-        const points = polygon.map((coord: any) => ({ 
-          x: parseFloat(coord[0]), // longitude
-          y: parseFloat(coord[1])  // latitude
+      for (let pi = 0; pi < allPolygons.length; pi++) {
+        const polygon = allPolygons[pi];
+        const points = polygon.map((coord: any) => ({
+          x: parseFloat(coord[0]),
+          y: parseFloat(coord[1]),
         }));
 
-        totalOriginalPoints += points.length;
+        const originalCount = points.length;
+        totalOriginalPoints += originalCount;
 
-        // Simplify polygon using simplify-js
-        // tolerance: higher value = fewer points (0.01 degrees ≈ 1km, 0.1 degrees ≈ 11km)
-        // highQuality: true = better quality but slower
-        const simplifiedPoints = simplify(points, tolerance, true);
+        // Bounding box of this polygon only (for per-polygon tolerance)
+        let pMinLon = Infinity, pMaxLon = -Infinity, pMinLat = Infinity, pMaxLat = -Infinity;
+        for (const pt of points) {
+          pMinLon = Math.min(pMinLon, pt.x);
+          pMaxLon = Math.max(pMaxLon, pt.x);
+          pMinLat = Math.min(pMinLat, pt.y);
+          pMaxLat = Math.max(pMaxLat, pt.y);
+        }
+        const polyLatRange = pMaxLat - pMinLat;
+        const polyLonRange = pMaxLon - pMinLon;
+        const polygonAreaSize = Math.max(polyLatRange, polyLonRange);
+
+        // 1% of span keeps shape recognizable; user can override via polygon_threshold for global override
+        let polygonTolerance = params.polygon_threshold ?? polygonAreaSize * 0.01;
+        polygonTolerance = Math.max(polygonTolerance, TOLERANCE_MIN);
+        polygonTolerance = Math.min(polygonTolerance, TOLERANCE_MAX);
+        tolerancesUsed.push(polygonTolerance);
+
+        const simplifiedPoints = simplify(points, polygonTolerance, true);
+        const simplifiedCount = simplifiedPoints.length;
+        totalSimplifiedPoints += simplifiedCount;
         allSimplifiedPolygons.push(simplifiedPoints);
-        totalSimplifiedPoints += simplifiedPoints.length;
+
+        logger.info(`   📐 area_bounds polygon ${pi + 1}/${allPolygons.length}: effective_tolerance=${polygonTolerance.toFixed(4)} points ${originalCount}→${simplifiedCount}`);
       }
 
       logger.info(`   📊 Original polygons have ${totalOriginalPoints} total points`);
-      logger.info(`   ✂️  Simplified polygons to ${totalSimplifiedPoints} total points (tolerance: ${tolerance})`);
+      logger.info(`   ✂️  Simplified to ${totalSimplifiedPoints} points (tolerances: ${tolerancesUsed.map(t => t.toFixed(4)).join(', ')})`);
 
       // Build PostgreSQL WKT format
       let postgresPolygon: string;
@@ -1034,34 +1042,69 @@ If the tool fails to find the location, it will return success: false with error
       logger.info(`   Points: ${totalOriginalPoints} → ${totalSimplifiedPoints} (simplified)`);
       logger.info(`   ${geometryTypeName}: ${postgresPolygon.substring(0, 100)}...`);
 
-      // Return structured JSON response for easier LLM handling
+      // Store boundary in area_bounds and return only id + area_name (reduces token usage)
+      const canWrite = sequelizeUpdate !== sequelizeReadOnly;
+      if (!canWrite) {
+        logger.error(`   ❌ Area bounds storage not configured: UPDATE_USER/UPDATE_PASSWORD required to insert into area_bounds`);
+        return JSON.stringify({
+          success: false,
+          location: cleanParams,
+          error: 'Area bounds storage is not configured. Set UPDATE_USER and UPDATE_PASSWORD to enable geographic queries.',
+          suggestions: [
+            'Configure UPDATE_USER and UPDATE_PASSWORD for the application',
+            'Inform the user that geographic filtering is temporarily unavailable',
+          ],
+        }, null, 2);
+      }
+
+      let areaBoundId: number;
+      try {
+        // Deduplicate by area_name: reuse existing row if present
+        const existing = await sequelizeUpdate.query<{ id: number }>(
+          `SELECT id FROM area_bounds WHERE area_name = :areaName LIMIT 1`,
+          { type: QueryTypes.SELECT, replacements: { areaName: locationName } }
+        );
+        if (existing && existing.length > 0) {
+          areaBoundId = existing[0].id;
+          logger.info(`   📌 Reused existing area_bounds id=${areaBoundId} for "${locationName}"`);
+        } else {
+          const insertResult = await sequelizeUpdate.query(
+            `INSERT INTO area_bounds (area_name, boundary, location_params)
+             VALUES (:areaName, ST_GeomFromText(:wkt, 4326), :locationParams::jsonb)
+             RETURNING id`,
+            {
+              type: QueryTypes.INSERT,
+              replacements: {
+                areaName: locationName,
+                wkt: postgresPolygon,
+                locationParams: JSON.stringify(cleanParams),
+              },
+            }
+          );
+          // Sequelize raw query may return [rows, metadata]; RETURNING gives rows
+          const rows = Array.isArray(insertResult) ? insertResult[0] : insertResult;
+          const firstRow = Array.isArray(rows) ? rows[0] : rows;
+          areaBoundId = firstRow?.id;
+          if (areaBoundId == null) throw new Error('INSERT RETURNING id did not return id');
+          logger.info(`   📌 Inserted area_bounds id=${areaBoundId} for "${locationName}"`);
+        }
+      } catch (dbError: any) {
+        logger.error(`   ❌ Failed to insert area_bounds:`, dbError?.message || dbError);
+        return JSON.stringify({
+          success: false,
+          location: cleanParams,
+          error: dbError?.message || String(dbError),
+          suggestions: [
+            'Ensure area_bounds table exists (run sql/create_area_bounds.sql) and PostGIS is enabled',
+            'Inform the user that the area boundary could not be stored',
+          ],
+        }, null, 2);
+      }
+
       return JSON.stringify({
         success: true,
-        location: cleanParams,
-        location_name: locationName,
-        bounding_box: {
-          min_latitude: minLat,
-          max_latitude: maxLat,
-          min_longitude: minLon,
-          max_longitude: maxLon,
-        },
-        polygon: {
-          geometry_type: geometryType, // 'Polygon' or 'MultiPolygon'
-          postgres_format: postgresPolygon,
-          points_count: {
-            original: totalOriginalPoints,
-            simplified: totalSimplifiedPoints,
-            polygons_count: allSimplifiedPolygons.length,
-          },
-          coordinates: allCoordinates, // [longitude, latitude] pairs
-        },
-        usage: {
-          sql_example: `WHERE ST_Contains(
-              ST_GeomFromText('${postgresPolygon}', 4326),
-              ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)
-          )`,
-          note: "Use the polygon.postgres_format field directly in your SQL query with ST_Contains or ST_Within. The format may be POLYGON or MULTIPOLYGON depending on the location.",
-        },
+        area_bound_id: areaBoundId,
+        area_name: locationName,
       }, null, 2);
     } catch (error: any) {
       const errorMessage = error?.message || String(error);

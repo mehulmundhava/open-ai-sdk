@@ -27,6 +27,66 @@ function stripLocalhostFromCsvLinks(text: string): string {
   return out;
 }
 
+/** Build a minimal token summary from full token usage report (for logs and API response). */
+function simplifyTokenUsage(tokenUsage: any): { prompt: number; completion: number; total: number; cached?: number; stagesCount?: number } | undefined {
+  if (!tokenUsage?.total) return undefined;
+  const t = tokenUsage.total;
+  const cached = t.cachedTokens ?? tokenUsage.stages?.reduce?.((s: number, st: any) => s + (st.tokens?.cachedTokens ?? 0), 0);
+  return {
+    prompt: t.promptTokens ?? 0,
+    completion: t.completionTokens ?? 0,
+    total: t.totalTokens ?? 0,
+    ...(cached > 0 && { cached }),
+    ...(Array.isArray(tokenUsage.stages) && { stagesCount: tokenUsage.stages.length }),
+  };
+}
+
+/** Build tools_used as object keyed by tool name with token usage per tool (attributed from stages in order). */
+function buildToolsUsedWithTokens(result: { toolCalls?: Array<{ tool: string; input?: any }>; tokenUsage?: any }): Record<
+  string,
+  { prompt: number; completion: number; total: number; call_count?: number }
+> {
+  const toolCalls = result.toolCalls ?? [];
+  const stages = result.tokenUsage?.stages;
+  // Use only stages that have non-zero usage (avoid duplicate entries like .providerData / .usage)
+  const stagesWithUsage = Array.isArray(stages)
+    ? stages.filter((s: any) => (s.tokens?.promptTokens ?? 0) > 0 || (s.tokens?.completionTokens ?? 0) > 0)
+    : [];
+  // Dedupe by (prompt, completion) so we count each distinct API call once
+  const seen = new Set<string>();
+  const uniqueStages = stagesWithUsage.filter((s: any) => {
+    const key = `${s.tokens?.promptTokens ?? 0}-${s.tokens?.completionTokens ?? 0}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+
+  const zero = { prompt: 0, completion: 0, total: 0 };
+  const perCall: Array<{ prompt: number; completion: number; total: number }> = toolCalls.map((_, i) => {
+    const stage = uniqueStages[i];
+    if (!stage?.tokens) return zero;
+    return {
+      prompt: stage.tokens.promptTokens ?? 0,
+      completion: stage.tokens.completionTokens ?? 0,
+      total: stage.tokens.totalTokens ?? 0,
+    };
+  });
+
+  const byTool: Record<string, { prompt: number; completion: number; total: number; call_count: number }> = {};
+  toolCalls.forEach((tc, i) => {
+    const name = tc.tool;
+    const usage = perCall[i] ?? zero;
+    if (!byTool[name]) {
+      byTool[name] = { prompt: 0, completion: 0, total: 0, call_count: 0 };
+    }
+    byTool[name].prompt += usage.prompt;
+    byTool[name].completion += usage.completion;
+    byTool[name].total += usage.total;
+    byTool[name].call_count += 1;
+  });
+  return byTool;
+}
+
 /**
  * Normalize SQL query by removing line breaks and extra whitespace
  * Makes the query executable in adminer.php and other SQL tools
@@ -77,15 +137,12 @@ export async function processChat(
   const isFirstMessage = chatEntry.last_message_at === null;
   const requestLogger = createRequestLogger(requestId, userId);
 
-  // Log comprehensive conversation start
-  requestLogger.info('💬 CONVERSATION REQUEST', {
+  requestLogger.info('💬 REQUEST', {
     requestId,
-    chatId,
-    userId,
-    isFirstMessage,
-    question: payload.question,
-    questionLength: payload.question.length,
-    timestamp: new Date().toISOString(),
+    userId: payload.user_id,
+    chatId: payload.chat_id,
+    question: payload.question?.substring(0, 80),
+    chatHistoryLength: payload.chat_history?.length || 0,
   });
 
   // Authentication validation
@@ -195,21 +252,17 @@ export async function processChat(
 
     requestLogger.info(`[chat] agent done in ${elapsedTime}ms`);
 
-    // Log comprehensive conversation summary
-    requestLogger.info('💬 CONVERSATION SUMMARY', {
+    const tokenSummary = simplifyTokenUsage(result.tokenUsage);
+    const tools_used = buildToolsUsedWithTokens(result);
+    requestLogger.info('💬 SUMMARY', {
       requestId,
-      chatId,
-      userId,
-      isFirstMessage,
-      question: payload.question,
-      answer: result.answer.substring(0, 200),
-      sqlQuery: result.sqlQuery,
-      toolCallsCount: result.toolCalls?.length || 0,
-      toolErrorsCount: result.toolErrors?.length || 0,
-      elapsedTimeMs: elapsedTime,
-      tokenUsage: result.tokenUsage,
-      hasSqlQuery: !!result.sqlQuery,
-      hasQueryResult: !!result.queryResult,
+      question: payload.question?.substring(0, 60),
+      answerLen: result.answer?.length ?? 0,
+      hasSql: !!result.sqlQuery,
+      toolCalls: result.toolCalls?.length ?? 0,
+      toolErrors: result.toolErrors?.length ?? 0,
+      elapsedMs: elapsedTime,
+      tokens: tokenSummary,
     });
 
     // Check if execute_db_query tool was used
@@ -226,23 +279,8 @@ export async function processChat(
     );
     const journeyToolSql = journeyToolCall?.input?.sql;
 
-    // Calculate total cached tokens from token usage
-    const totalCachedTokens = result.tokenUsage?.total?.cachedTokens || 
-                              result.tokenUsage?.stages?.reduce(
-                                (sum: number, stage: any) => sum + (stage.tokens?.cachedTokens || 0),
-                                0
-                              ) || 0;
-
-    // Log cached tokens benefit
-    if (totalCachedTokens > 0) {
-      requestLogger.info(`📦 Performance: ${totalCachedTokens} tokens saved via prompt cache`, {
-        cachedTokens: totalCachedTokens,
-        totalPromptTokens: result.tokenUsage?.total?.promptTokens || 0,
-        cacheHitRate: result.tokenUsage?.total?.promptTokens 
-          ? `${((totalCachedTokens / result.tokenUsage.total.promptTokens) * 100).toFixed(2)}%`
-          : '0%',
-      });
-    }
+    const totalCachedTokens = result.tokenUsage?.total?.cachedTokens
+      ?? result.tokenUsage?.stages?.reduce?.((sum: number, stage: any) => sum + (stage.tokens?.cachedTokens || 0), 0) ?? 0;
 
     // Process answer to strip localhost URLs (already done in agentResponseProcessor, but double-check)
     const processedAnswer = stripLocalhostFromCsvLinks(result.answer);
@@ -263,22 +301,13 @@ export async function processChat(
       debug: {
         request_id: requestId,
         elapsed_time_ms: elapsedTime,
-        token_usage: result.tokenUsage,
-        token_usage_history: result.tokenUsage?.stages || [],
-        cached_tokens: totalCachedTokens, // Add cached tokens to debug
-        cache_performance: totalCachedTokens > 0 ? {
-          cached_tokens: totalCachedTokens,
-          total_prompt_tokens: result.tokenUsage?.total?.promptTokens || 0,
-          cache_hit_rate: result.tokenUsage?.total?.promptTokens 
-            ? `${((totalCachedTokens / result.tokenUsage.total.promptTokens) * 100).toFixed(2)}%`
-            : '0%',
-        } : undefined,
-        tool_calls: result.toolCalls,
-        tool_calls_count: result.toolCalls?.length || 0,
-        tool_errors: result.toolErrors,
-        tool_errors_count: result.toolErrors?.length || 0,
+        token_usage: tokenSummary ?? { prompt: 0, completion: 0, total: 0 },
+        tools_used,
+        cached_tokens: totalCachedTokens,
+        tool_calls_count: result.toolCalls?.length ?? 0,
+        tool_errors_count: result.toolErrors?.length ?? 0,
         sql_query: normalizedSqlQuery,
-        execute_db_query: executeDbQuerySql || journeyToolSql || undefined, // SQL query executed via execute_db_query or journey tools
+        execute_db_query: executeDbQuerySql || journeyToolSql || undefined,
         query_result: result.queryResult,
         conversation: {
           question: payload.question,
