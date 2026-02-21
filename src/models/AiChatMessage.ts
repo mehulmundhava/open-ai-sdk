@@ -9,10 +9,11 @@ export interface AiChatMessageAttributes {
   response_message: string | null;
   response: Record<string, any> | null;
   token_consumption: Record<string, any> | null;
+  history: Record<string, any[]> | null;
 }
 
 export interface AiChatMessageCreationAttributes
-  extends Optional<AiChatMessageAttributes, 'id' | 'created_at' | 'user_message' | 'response_message' | 'response' | 'token_consumption'> {}
+  extends Optional<AiChatMessageAttributes, 'id' | 'created_at' | 'user_message' | 'response_message' | 'response' | 'token_consumption' | 'history'> {}
 
 export class AiChatMessage extends Model<AiChatMessageAttributes, AiChatMessageCreationAttributes>
   implements AiChatMessageAttributes {
@@ -24,6 +25,7 @@ export class AiChatMessage extends Model<AiChatMessageAttributes, AiChatMessageC
   public response_message!: string | null;
   public response!: Record<string, any> | null;
   public token_consumption!: Record<string, any> | null;
+  public history!: Record<string, any> | null;
 
   public static initModel(sequelize: Sequelize): typeof AiChatMessage {
     return AiChatMessage.init(
@@ -59,6 +61,10 @@ export class AiChatMessage extends Model<AiChatMessageAttributes, AiChatMessageC
           allowNull: true,
         },
         token_consumption: {
+          type: DataTypes.JSONB,
+          allowNull: true,
+        },
+        history: {
           type: DataTypes.JSONB,
           allowNull: true,
         },

@@ -6,7 +6,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 
 // configure env (works in both CJS and ESM)
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const __dirname = path.dirname(fileURLToPath(import.meta.ur));
 dotenv.config({ path: path.resolve(__dirname, '../.env') });
 
 // In-memory store: 1st tool writes plan, 2nd/3rd tools read it (planId required from 1st result)
@@ -95,26 +95,41 @@ const agent = new Agent({
 
 async function main() {
   const client = new OpenAI();
-  const { id: conversationId } = await client.conversations.create({});
-  console.log('conversationId:', conversationId);
+  // const { id: conversationId } = await client.conversations.create({});
+  // console.log('conversationId:', conversationId);
 
-  // Single message: agent must call resolve_trip -> then get_flights and get_restaurants (planId + nextAction from 1st)
-  console.log('\n--- Message: trip Paris (1st tool → planId/nextAction → 2nd then 3rd tool with same planId) ---');
-  const result = await run(
-    agent,
-    'I want to go from London to Paris. I need flights and a dinner restaurant.',
-    { conversationId }
-  );
-  console.log('Final:', result.finalOutput);
+  // // Single message: agent must call resolve_trip -> then get_flights and get_restaurants (planId + nextAction from 1st)
+  // console.log('\n--- Message: trip Paris (1st tool → planId/nextAction → 2nd then 3rd tool with same planId) ---');
+  // const result = await run(
+  //   agent,
+  //   'I want to go from London to Paris. I need flights and a dinner restaurant.',
+  //   { previousResponseId: undefined }
+  // );
+  // let previousResponseId = result.lastResponseId;
+  // console.log('previousResponseId:', previousResponseId);
+  let previousResponseId: string | undefined = 'resp_0531cf18cced19ad006999d005132881909a792b255f72433f';
 
-  // Follow-up in same conversation – must also call tools (new trip = new resolve_trip → get_flights / get_restaurants)
-  console.log('\n--- Follow-up (same conversationId, requires tool calls again) ---');
-  const result2 = await run(
+  // // Follow-up in same conversation – must also call tools (new trip = new resolve_trip → get_flights / get_restaurants)
+  // console.log('\n--- Follow-up (same conversationId, requires tool calls again) ---');
+  // const result2 = await run(
+  //   agent,
+  //   'Now plan a trip from Paris to Berlin: I need flights and a good restaurant for dinner there. which trip is better?',
+  //   { previousResponseId: previousResponseId }
+  // );
+  // console.log('Final:', result2.finalOutput);
+  // previousResponseId = result2.lastResponseId;
+  // console.log('previousResponseId:', previousResponseId);
+
+  previousResponseId = 'resp_0531cf18cced19ad006999d1257b4081908d69b67e119ed198';
+
+  const result3 = await run(
     agent,
-    'Now plan a trip from Paris to Berlin: I need flights and a good restaurant for dinner there. which trip is better-?',
-    { conversationId }
+    'give list of trips i have mentioned previously.',
+    { previousResponseId: previousResponseId }
   );
-  console.log('Final:', result2.finalOutput);
+  console.log('Final:', result3.finalOutput);
+  previousResponseId = result3.lastResponseId;
+  console.log('previousResponseId:', previousResponseId);
 }
 
 main().catch(console.error);

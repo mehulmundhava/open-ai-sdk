@@ -61,7 +61,7 @@ declare global {
   }
 }
 
-router.post('/', async (req: Request, res: Response) => {
+router.post('/:chatId/message', async (req: Request, res: Response) => {
   try {
     const chatId = req.params.chatId;
     const payload: ChatRequest = req.body;

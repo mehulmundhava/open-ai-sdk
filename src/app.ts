@@ -68,7 +68,7 @@ async function initializeServices() {
 
 // Register routes
 app.use('/health', healthRouter);
-app.use('/chat/:chatId/message', chatRouter);
+app.use('/chat', chatRouter);
 app.use('/vector-search', vectorSearchRouter);
 app.use('/', embeddingsRouter); // Embeddings routes are at root level (e.g., /reload-vector-store, /generate-embeddings-examples)
 app.use('/download-csv', csvDownloadRouter);

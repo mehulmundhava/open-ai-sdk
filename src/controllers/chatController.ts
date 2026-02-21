@@ -124,23 +124,22 @@ export async function processChat(
       throw new Error(`Chat entry not found for chatId: ${chatId}`);
     }
   } catch (error: any) {
-    logger.error(`❌ Error fetching chat entry: ${error?.message}`);
+    logger.error(`❌ Error fetching chat entry: ${error?.message} for chatId: ${chatId}`);
     return {
       token_id: payload.token_id,
-      answer: `Error: Chat entry not found. Please create a new chat entry first.`,
+      answer: `Error: Chat entry not found. Please create a new chat entry first. for chatId: ${chatId}`,
       llm_used: false,
       error: error?.message || 'Chat entry not found',
     };
   }
 
   const userId = String(chatEntry.user_id);
-  const isFirstMessage = chatEntry.last_message_at === null;
   const requestLogger = createRequestLogger(requestId, userId);
 
   requestLogger.info('💬 REQUEST', {
     requestId,
     userId: payload.user_id,
-    chatId: payload.chat_id,
+    chatId,
     question: payload.question?.substring(0, 80),
     chatHistoryLength: payload.chat_history?.length || 0,
   });
@@ -228,14 +227,13 @@ export async function processChat(
 
     // Run agent with conversation session
     const startTime = Date.now();
-    const result = await runChatAgent(
+    const result: any = await runChatAgent(
       agent,
       payload.question,
       userId,
       vectorStore,
       tokenTracker,
       chatId, // conversationId
-      isFirstMessage // include static content only on first message
     );
     const elapsedTime = Date.now() - startTime;
 
@@ -266,16 +264,17 @@ export async function processChat(
     });
 
     // Check if execute_db_query tool was used
+    type ToolCallItem = { tool: string; input?: { query?: string; sql?: string } };
     const executeDbQueryCall = result.toolCalls?.find(
-      (tc) => tc.tool === 'execute_db_query'
+      (tc: ToolCallItem) => tc.tool === 'execute_db_query'
     );
-    const executeDbQuerySql = executeDbQueryCall?.input?.query || 
+    const executeDbQuerySql = executeDbQueryCall?.input?.query ||
                               (executeDbQueryCall?.input?.sql ? executeDbQueryCall.input.sql : undefined) ||
                               result.sqlQuery;
-    
+
     // Also check journey tools for SQL
     const journeyToolCall = result.toolCalls?.find(
-      (tc) => tc.tool === 'journey_list_tool' || tc.tool === 'journey_count_tool'
+      (tc: ToolCallItem) => tc.tool === 'journey_list_tool' || tc.tool === 'journey_count_tool'
     );
     const journeyToolSql = journeyToolCall?.input?.sql;
 
@@ -329,7 +328,7 @@ export async function processChat(
     // Log if SQL query is missing
     if (!result.sqlQuery && result.toolCalls && result.toolCalls.length > 0) {
       requestLogger.warn('⚠️  SQL query not extracted from tool calls', {
-        toolCalls: result.toolCalls.map(tc => ({
+        toolCalls: result.toolCalls.map((tc: any) => ({
           tool: tc.tool,
           input: tc.input,
         })),
@@ -345,6 +344,7 @@ export async function processChat(
         response_message: processedAnswer,
         response: response, // Full response object as JSONB
         token_consumption: result.tokenUsage || null, // Token usage data as JSONB
+        history : result.history || null,
       });
       requestLogger.info('✅ Saved chat message to database', {
         chatId,

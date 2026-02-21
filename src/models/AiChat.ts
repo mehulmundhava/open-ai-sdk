@@ -1,36 +1,23 @@
 import { Model, DataTypes, Sequelize, Optional } from 'sequelize';
 
 export interface AiChatAttributes {
-<<<<<<< HEAD
   id: string; // UUID
   user_id: number; // BIGINT
+  previous_response_id: string | null;
   created_at: Date;
   last_message_at: Date | null;
 }
 
 export interface AiChatCreationAttributes
-  extends Optional<AiChatAttributes, 'id' | 'created_at' | 'last_message_at'> {}
+  extends Optional<AiChatAttributes, 'id' | 'created_at' | 'last_message_at' | 'previous_response_id'> {}
 
 export class AiChat extends Model<AiChatAttributes, AiChatCreationAttributes>
   implements AiChatAttributes {
-=======
-  id: string;
-  user_id: number;
-  created_at: Date;
-  last_message_at: Date | null;
-  conversation_id: string | null;
-}
-
-export interface AiChatCreationAttributes
-  extends Optional<AiChatAttributes, 'id' | 'created_at' | 'last_message_at' | 'conversation_id'> {}
-
-export class AiChat extends Model<AiChatAttributes, AiChatCreationAttributes> implements AiChatAttributes {
->>>>>>> 43e52a8f03b0ba0c2a7bad8ca7584ff9f3adab5b
   public id!: string;
   public user_id!: number;
+  public previous_response_id!: string | null;
   public created_at!: Date;
   public last_message_at!: Date | null;
-
   public static initModel(sequelize: Sequelize): typeof AiChat {
     return AiChat.init(
       {
@@ -42,6 +29,10 @@ export class AiChat extends Model<AiChatAttributes, AiChatCreationAttributes> im
         user_id: {
           type: DataTypes.BIGINT,
           allowNull: false,
+        },
+        previous_response_id: {
+          type: DataTypes.UUID,
+          allowNull: true,
         },
         created_at: {
           type: DataTypes.DATE,

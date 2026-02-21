@@ -53,6 +53,7 @@ Rules for ALLOWING:
 - Queries asking for journey counts, journey lists, journeys between facilities, journeys in time periods
 - Queries asking for shipment lists, shipment counts, shipments in time periods or locations
 - Queries that use proper filtering and don't expose sensitive data
+- Queries that are related to current chat previous messages information
 
 IMPORTANT: 
 - Journey queries are business queries about device movement patterns and facility transitions. They are processed by specialized journey calculation tools. These queries should be ALLOWED.
@@ -92,6 +93,7 @@ IMPORTANT:
 - Shipment queries are business queries about device shipments and movements. They are processed by specialized journey calculation tools. These queries should be ALLOWED.
 - Queries asking for "list of shipments" or "shipments occurred" are legitimate business queries and should be ALLOWED.
 - Do NOT block queries just because they ask for a "list" - if they are about journeys or shipments, they are legitimate business queries.
+- Queries that are related to current chat previous messages information are ALLOWED.
 
 Always provide a clear reason for your decision.`,
       model,

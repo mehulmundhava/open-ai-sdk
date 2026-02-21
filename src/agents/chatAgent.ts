@@ -1,4 +1,4 @@
-import { Agent, run } from '@openai/agents';
+import { Agent, AgentInputItem, run } from '@openai/agents';
 import { OpenAIChatCompletionsModel, setDefaultOpenAIKey } from '@openai/agents-openai';
 import OpenAI from 'openai';
 import { settings } from '../config/settings';
@@ -17,6 +17,8 @@ import {
 import { logger } from '../utils/logger';
 import { TokenTracker } from '../utils/tokenTracker';
 import { AgentResponseProcessor } from '../utils/agentResponseProcessor';
+import { AiChat } from '../models/AiChat';
+import { AiChatMessage } from '../models/AiChatMessage';
 
 export interface ChatAgentConfig {
   userId?: string;
@@ -315,8 +317,7 @@ export async function runChatAgent(
   userId: string,
   vectorStore: VectorStoreService,
   tokenTracker: TokenTracker,
-  conversationId?: string,
-  isFirstMessage: boolean = true
+  chatId?: string,
 ): Promise<{
   answer: string;
   sqlQuery?: string;
@@ -336,6 +337,7 @@ export async function runChatAgent(
     error: string;
     input?: any;
   }>;
+  history?: any;
   }> {
   try {
     // Detect journey question
@@ -349,15 +351,17 @@ export async function runChatAgent(
       question, 
       vectorStore, 
       isJourney,
-      isFirstMessage
     );
     
     // Construct final system prompt: Static (cached) + Dynamic (RAG) + User question
     // The static prefix will be cached, dynamic sections change per request
     // On subsequent messages, staticPrefix will be empty
-    const finalSystemPrompt = isFirstMessage 
-      ? staticPrefix + dynamicSections 
-      : dynamicSections;
+
+    // const finalSystemPrompt = isFirstMessage 
+    //   ? staticPrefix + dynamicSections 
+    //   : dynamicSections;
+
+    const finalSystemPrompt = staticPrefix + dynamicSections;
 
     // Determine prompt cache key based on question type
     const promptCacheKey = isJourney ? 'sql_assistant_journey_v1' : 'sql_assistant_v1';
@@ -373,8 +377,7 @@ export async function runChatAgent(
     // Log conversation start with cache key
     logger.info('💬 CONVERSATION START', {
       userId,
-      conversationId,
-      isFirstMessage,
+      chatId,
       question,
       isJourney,
       promptCacheKey,
@@ -387,15 +390,23 @@ export async function runChatAgent(
     // The prompt_cache_key helps identify which cache to use, but caching works automatically
     // when the same static prefix is used across requests
     
-    // Log cache key for monitoring (actual caching happens automatically by OpenAI)
-    logger.info('📦 Prompt Cache Configuration', {
-      promptCacheKey,
-      staticPrefixLength: isFirstMessage ? staticPrefix.length : 0,
-      estimatedTokens: isFirstMessage ? Math.ceil(staticPrefix.length / 4) : 0, // Rough estimate: ~4 chars per token
-      isJourney,
-      isFirstMessage,
-      conversationId,
-    });
+
+
+    const ai_chat = await AiChat.findByPk(chatId);
+    if (!ai_chat) {
+      throw new Error(`Chat entry not found for chatId: ${chatId}`);
+    }
+    const previousResponseId = ai_chat?.previous_response_id || null;
+    const lastMessage = await AiChatMessage.findOne({ where: { chat_id: chatId }, order: [['created_at', 'DESC']], raw: true });
+    console.log('-----> lastMessage:', lastMessage);
+
+    const previousHistory = lastMessage?.history || [];
+    let thread: AgentInputItem[] = previousHistory as AgentInputItem[];
+
+    // console.log('-----> previousResponseId:', previousResponseId);
+
+    // const other_option: any = previousResponseId ? { previousResponseId } : {};
+    const other_option : any = {  };
 
     // Run the agent
     // Note: Conversation history is managed by OpenAI's API automatically when using the same conversationId
@@ -403,7 +414,11 @@ export async function runChatAgent(
     // For now, we rely on the model's built-in conversation management
     // The static prefix in the system prompt will be cached by OpenAI automatically
     // when it's >= 1024 tokens and matches previous requests
-    const result = await run(updatedAgent, question);
+    const result: any = await run(updatedAgent,  thread.concat({ role: 'user', content: question }), other_option);
+
+    // if(result.lastResponseId) {
+    //   await AiChat.update({ previous_response_id: result.lastResponseId }, { where: { id: chatId } });
+    // }
 
     // Extract usage data (cast to any to access usage property that exists at runtime)
     const resultAny = result as any;
@@ -438,6 +453,7 @@ export async function runChatAgent(
       tokenUsage: tokenTracker.getReport(),
       toolCalls: processed.toolCalls.length > 0 ? processed.toolCalls : undefined,
       toolErrors: processed.toolErrors.length > 0 ? processed.toolErrors : undefined,
+      history: result.history,
     };
   } catch (error: any) {
     const errorDetails = {
