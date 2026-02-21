@@ -963,32 +963,52 @@ If the tool fails, it returns success: false with error and suggestions.`,
         minLat = maxLat = minLon = maxLon = 0;
       }
 
-      // Simplify each polygon separately and build WKT format
-      const tolerance = 0.05; // Adjust this value to control simplification level
+      // Per-polygon dynamic tolerance: small areas (e.g. city) get small tolerance, large areas (e.g. country) get larger
+      const TOLERANCE_MIN = 0.0001;
+      const TOLERANCE_MAX = 0.15;
       const allSimplifiedPolygons: Array<Array<{x: number, y: number}>> = [];
+      const tolerancesUsed: number[] = [];
       let totalOriginalPoints = 0;
       let totalSimplifiedPoints = 0;
 
-      for (const polygon of allPolygons) {
-        // Convert coordinates to simplify-js format: {x, y}
-        // Note: OpenStreetMap uses [longitude, latitude] format
-        const points = polygon.map((coord: any) => ({ 
-          x: parseFloat(coord[0]), // longitude
-          y: parseFloat(coord[1])  // latitude
+      for (let pi = 0; pi < allPolygons.length; pi++) {
+        const polygon = allPolygons[pi];
+        const points = polygon.map((coord: any) => ({
+          x: parseFloat(coord[0]),
+          y: parseFloat(coord[1]),
         }));
 
-        totalOriginalPoints += points.length;
+        const originalCount = points.length;
+        totalOriginalPoints += originalCount;
 
-        // Simplify polygon using simplify-js
-        // tolerance: higher value = fewer points (0.01 degrees ≈ 1km, 0.1 degrees ≈ 11km)
-        // highQuality: true = better quality but slower
-        const simplifiedPoints = simplify(points, tolerance, true);
+        // Bounding box of this polygon only (for per-polygon tolerance)
+        let pMinLon = Infinity, pMaxLon = -Infinity, pMinLat = Infinity, pMaxLat = -Infinity;
+        for (const pt of points) {
+          pMinLon = Math.min(pMinLon, pt.x);
+          pMaxLon = Math.max(pMaxLon, pt.x);
+          pMinLat = Math.min(pMinLat, pt.y);
+          pMaxLat = Math.max(pMaxLat, pt.y);
+        }
+        const polyLatRange = pMaxLat - pMinLat;
+        const polyLonRange = pMaxLon - pMinLon;
+        const polygonAreaSize = Math.max(polyLatRange, polyLonRange);
+
+        // 1% of span keeps shape recognizable; user can override via polygon_threshold for global override
+        let polygonTolerance = params.polygon_threshold ?? polygonAreaSize * 0.01;
+        polygonTolerance = Math.max(polygonTolerance, TOLERANCE_MIN);
+        polygonTolerance = Math.min(polygonTolerance, TOLERANCE_MAX);
+        tolerancesUsed.push(polygonTolerance);
+
+        const simplifiedPoints = simplify(points, polygonTolerance, true);
+        const simplifiedCount = simplifiedPoints.length;
+        totalSimplifiedPoints += simplifiedCount;
         allSimplifiedPolygons.push(simplifiedPoints);
-        totalSimplifiedPoints += simplifiedPoints.length;
+
+        logger.info(`   📐 area_bounds polygon ${pi + 1}/${allPolygons.length}: effective_tolerance=${polygonTolerance.toFixed(4)} points ${originalCount}→${simplifiedCount}`);
       }
 
       logger.info(`   📊 Original polygons have ${totalOriginalPoints} total points`);
-      logger.info(`   ✂️  Simplified polygons to ${totalSimplifiedPoints} total points (tolerance: ${tolerance})`);
+      logger.info(`   ✂️  Simplified to ${totalSimplifiedPoints} points (tolerances: ${tolerancesUsed.map(t => t.toFixed(4)).join(', ')})`);
 
       // Build PostgreSQL WKT format
       let postgresPolygon: string;

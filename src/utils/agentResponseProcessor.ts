@@ -103,7 +103,8 @@ export class AgentResponseProcessor {
   }
 
   /**
-   * Extract tool calls from various locations in the result
+   * Extract tool calls from various locations in the result.
+   * Prefer state.toolCalls / state.toolResults (executed tools) so we only count tools that ran.
    */
   async extractToolCalls(result: any): Promise<ToolCallInfo[]> {
     const toolCalls: ToolCallInfo[] = [];
@@ -112,41 +113,36 @@ export class AgentResponseProcessor {
     logger.debug('🔍 Extracting tool calls from result structure', {
       hasSteps: 'steps' in result,
       hasState: !!resultAny.state,
-      hasModelResponses: !!resultAny.state?.modelResponses,
       hasToolCalls: !!resultAny.state?.toolCalls,
       hasToolResults: !!resultAny.state?.toolResults,
     });
 
-    // Method 1: Extract from steps array
-    if ('steps' in result && Array.isArray(result.steps)) {
-      logger.debug(`   Method 1: Found ${result.steps.length} steps`);
-      this.extractFromSteps(result.steps, toolCalls);
-    }
-
-    // Method 2: Extract from state.modelResponses (OpenAI Agents SDK structure)
-    if (resultAny.state?.modelResponses && Array.isArray(resultAny.state.modelResponses)) {
-      logger.debug(`   Method 2: Found ${resultAny.state.modelResponses.length} model responses`);
-      await this.extractFromModelResponses(resultAny.state.modelResponses, toolCalls);
-    }
-
-    // Method 3: Extract from executed tool calls in state
-    if (resultAny.state?.toolCalls || resultAny.state?.toolResults) {
-      const toolCallsCount = (resultAny.state.toolCalls || []).length;
-      const toolResultsCount = (resultAny.state.toolResults || []).length;
-      logger.debug(`   Method 3: Found ${toolCallsCount} toolCalls, ${toolResultsCount} toolResults`);
+    // Prefer executed tool calls (state) so counts reflect actual execution only
+    if (resultAny.state?.toolCalls?.length || resultAny.state?.toolResults?.length) {
       this.extractFromStateToolCalls(resultAny.state, toolCalls);
     }
 
-    // Method 4: Deep search for tool calls in state
+    if (toolCalls.length > 0) {
+      logger.info(`✅ Extracted ${toolCalls.length} tool call(s) from state (executed)`, {
+        tools: toolCalls.map((tc) => tc.tool),
+      });
+      return toolCalls;
+    }
+
+    // Fallbacks when state has no executed tool calls
+    if ('steps' in result && Array.isArray(result.steps)) {
+      this.extractFromSteps(result.steps, toolCalls);
+    }
+    if (toolCalls.length === 0 && resultAny.state?.modelResponses?.length) {
+      await this.extractFromModelResponses(resultAny.state.modelResponses, toolCalls);
+    }
     if (toolCalls.length === 0 && resultAny.state) {
-      logger.debug('   Method 4: Deep searching state for tool calls');
       this.deepSearchToolCalls(resultAny.state, toolCalls);
     }
 
     logger.info(`✅ Extracted ${toolCalls.length} tool call(s)`, {
-      tools: toolCalls.map(tc => tc.tool),
+      tools: toolCalls.map((tc) => tc.tool),
     });
-
     return toolCalls;
   }
 
@@ -202,14 +198,18 @@ export class AgentResponseProcessor {
         const toolInput = stepAny.toolCall?.input || stepAny.input || stepAny.args;
         const toolOutput = stepAny.toolCall?.result || stepAny.result || stepAny.output;
         const toolError = stepAny.error || stepAny.toolCall?.error;
-        
-        toolCalls.push({
-          tool: toolName,
-          input: toolInput,
-          output: toolOutput,
-          error: toolError,
-          hasError: !!toolError || (typeof toolOutput === 'string' && toolOutput.toLowerCase().includes('error')),
-        });
+        const exists = toolCalls.some(
+          (tc) => tc.tool === toolName && JSON.stringify(tc.input) === JSON.stringify(toolInput)
+        );
+        if (!exists) {
+          toolCalls.push({
+            tool: toolName,
+            input: toolInput,
+            output: toolOutput,
+            error: toolError,
+            hasError: !!toolError || (typeof toolOutput === 'string' && toolOutput.toLowerCase().includes('error')),
+          });
+        }
       }
     }
   }
@@ -233,7 +233,12 @@ export class AgentResponseProcessor {
               try {
                 const toolCallInfo = await this.parseAndExecuteToolCall(toolCall);
                 if (toolCallInfo) {
-                  toolCalls.push(toolCallInfo);
+                  const exists = toolCalls.some(
+                    (tc) =>
+                      tc.tool === toolCallInfo.tool &&
+                      JSON.stringify(tc.input) === JSON.stringify(toolCallInfo.input)
+                  );
+                  if (!exists) toolCalls.push(toolCallInfo);
                 }
               } catch (error: any) {
                 logger.error(`Error parsing tool call: ${error.message}`);
@@ -450,33 +455,21 @@ export class AgentResponseProcessor {
     const resultAny = result as any;
     let tokensExtracted = false;
 
-    // Method 1: Check result.usage directly
-    if ('usage' in result && result.usage) {
+    // Prefer state.modelResponses (one record per API turn; deduped in TokenTracker)
+    if (resultAny.state?.modelResponses && Array.isArray(resultAny.state.modelResponses)) {
+      tokensExtracted = this.extractTokensFromModelResponses(resultAny.state.modelResponses);
+    }
+
+    // Fallbacks only when no usage from modelResponses (TokenTracker dedupes by usage values)
+    if (!tokensExtracted && 'usage' in result && result.usage) {
       tokensExtracted = this.recordTokenUsage('main_agent', result.usage);
     }
-
-    // Method 2: Check state.modelResponses (ALWAYS check this for detailed usage with cached_tokens)
-    // This is important because providerData.usage contains prompt_tokens_details with cached_tokens
-    // We ALWAYS check this even if other methods found tokens, to ensure we capture all cached_tokens
-    if (resultAny.state?.modelResponses && Array.isArray(resultAny.state.modelResponses)) {
-      const modelResponseExtracted = this.extractTokensFromModelResponses(resultAny.state.modelResponses);
-      tokensExtracted = tokensExtracted || modelResponseExtracted;
+    if (!tokensExtracted && resultAny.state?.usage) {
+      tokensExtracted = this.recordTokenUsage('state_usage', resultAny.state.usage);
     }
-
-    // Method 3: Check state.usage
-    if (resultAny.state?.usage) {
-      const stateUsageExtracted = this.recordTokenUsage('state_usage', resultAny.state.usage);
-      tokensExtracted = tokensExtracted || stateUsageExtracted;
+    if (!tokensExtracted && 'steps' in result && Array.isArray(result.steps)) {
+      tokensExtracted = this.extractTokensFromSteps(result.steps);
     }
-
-    // Method 4: Check steps
-    if ('steps' in result && Array.isArray(result.steps)) {
-      const stepsExtracted = this.extractTokensFromSteps(result.steps);
-      tokensExtracted = tokensExtracted || stepsExtracted;
-    }
-
-    // Method 5: Deep search in state (only if we haven't found anything yet, to avoid duplicates)
-    // But we still want to check for providerData.usage in nested structures
     if (!tokensExtracted && resultAny.state) {
       tokensExtracted = this.deepSearchTokenUsage(resultAny.state);
     }
@@ -485,7 +478,6 @@ export class AgentResponseProcessor {
       logger.warn('⚠️  No token usage information found in any location');
     }
 
-    // Log total token usage with breakdown
     this.logTokenUsageSummary(toolCalls);
   }
 
@@ -521,7 +513,8 @@ export class AgentResponseProcessor {
   }
 
   /**
-   * Extract tokens from model responses
+   * Extract tokens from model responses. Record once per response only (providerData.usage
+   * or response.usage) to avoid double-counting the same API call.
    */
   private extractTokensFromModelResponses(modelResponses: any[]): boolean {
     let extracted = false;
@@ -529,20 +522,13 @@ export class AgentResponseProcessor {
 
     for (let i = 0; i < modelResponses.length; i++) {
       const response = modelResponses[i];
-
-      if (response?.providerData?.usage) {
-        if (this.recordTokenUsage(`model_response_${i}_provider`, response.providerData.usage)) {
-          extracted = true;
-        }
-      }
-      if (response?.usage) {
-        if (this.recordTokenUsage(`model_response_${i}`, response.usage)) {
+      const usage = response?.providerData?.usage ?? response?.usage;
+      if (usage && typeof usage === 'object') {
+        if (this.recordTokenUsage(`model_response_${i}`, usage)) {
           extracted = true;
         }
       }
     }
-    
-    logger.info(`🔍 Extraction complete: ${extracted ? 'found' : 'not found'} tokens from modelResponses`);
     return extracted;
   }
 

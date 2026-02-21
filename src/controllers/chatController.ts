@@ -40,6 +40,52 @@ function simplifyTokenUsage(tokenUsage: any): { prompt: number; completion: numb
   };
 }
 
+/** Build tools_used as object keyed by tool name with token usage per tool (attributed from stages in order). */
+function buildToolsUsedWithTokens(result: { toolCalls?: Array<{ tool: string; input?: any }>; tokenUsage?: any }): Record<
+  string,
+  { prompt: number; completion: number; total: number; call_count?: number }
+> {
+  const toolCalls = result.toolCalls ?? [];
+  const stages = result.tokenUsage?.stages;
+  // Use only stages that have non-zero usage (avoid duplicate entries like .providerData / .usage)
+  const stagesWithUsage = Array.isArray(stages)
+    ? stages.filter((s: any) => (s.tokens?.promptTokens ?? 0) > 0 || (s.tokens?.completionTokens ?? 0) > 0)
+    : [];
+  // Dedupe by (prompt, completion) so we count each distinct API call once
+  const seen = new Set<string>();
+  const uniqueStages = stagesWithUsage.filter((s: any) => {
+    const key = `${s.tokens?.promptTokens ?? 0}-${s.tokens?.completionTokens ?? 0}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+
+  const zero = { prompt: 0, completion: 0, total: 0 };
+  const perCall: Array<{ prompt: number; completion: number; total: number }> = toolCalls.map((_, i) => {
+    const stage = uniqueStages[i];
+    if (!stage?.tokens) return zero;
+    return {
+      prompt: stage.tokens.promptTokens ?? 0,
+      completion: stage.tokens.completionTokens ?? 0,
+      total: stage.tokens.totalTokens ?? 0,
+    };
+  });
+
+  const byTool: Record<string, { prompt: number; completion: number; total: number; call_count: number }> = {};
+  toolCalls.forEach((tc, i) => {
+    const name = tc.tool;
+    const usage = perCall[i] ?? zero;
+    if (!byTool[name]) {
+      byTool[name] = { prompt: 0, completion: 0, total: 0, call_count: 0 };
+    }
+    byTool[name].prompt += usage.prompt;
+    byTool[name].completion += usage.completion;
+    byTool[name].total += usage.total;
+    byTool[name].call_count += 1;
+  });
+  return byTool;
+}
+
 /**
  * Normalize SQL query by removing line breaks and extra whitespace
  * Makes the query executable in adminer.php and other SQL tools
@@ -147,6 +193,7 @@ export async function processChat(
     requestLogger.info(`[chat] agent done in ${elapsedTime}ms`);
 
     const tokenSummary = simplifyTokenUsage(result.tokenUsage);
+    const tools_used = buildToolsUsedWithTokens(result);
     requestLogger.info('💬 SUMMARY', {
       requestId,
       question: payload.question?.substring(0, 60),
@@ -195,6 +242,7 @@ export async function processChat(
         request_id: requestId,
         elapsed_time_ms: elapsedTime,
         token_usage: tokenSummary ?? { prompt: 0, completion: 0, total: 0 },
+        tools_used,
         cached_tokens: totalCachedTokens,
         tool_calls_count: result.toolCalls?.length ?? 0,
         tool_errors_count: result.toolErrors?.length ?? 0,

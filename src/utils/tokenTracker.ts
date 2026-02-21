@@ -49,9 +49,17 @@ export class TokenTracker {
   }
 
   /**
-   * Record token usage for a specific stage
+   * Record token usage for a specific stage.
+   * Dedupes by (prompt, completion, total) so the same usage from multiple extraction paths
+   * (e.g. providerData.usage vs usage, or deep_search duplicates) is only counted once.
    */
   recordStage(stage: string, tokens: TokenUsage): void {
+    const key = `${tokens.promptTokens}|${tokens.completionTokens}|${tokens.totalTokens}`;
+    const alreadyRecorded = this.stages.some(
+      (s) =>
+        `${s.tokens.promptTokens}|${s.tokens.completionTokens}|${s.tokens.totalTokens}` === key
+    );
+    if (alreadyRecorded) return;
     this.stages.push({
       stage,
       tokens,
