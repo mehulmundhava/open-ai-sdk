@@ -297,26 +297,20 @@ The query should return ALL matching rows - do not add LIMIT to the SQL query.`,
 });
 
 /**
- * Get table list tool
+ * Get table list (name + description only). Use this first to see available tables.
  */
 export const getTableListTool = tool({
   name: 'get_table_list',
-  description: `Get list of available tables with descriptions and important fields.
-
-Use this tool ONLY if you cannot generate a query from the examples provided in the system prompt.
-This is a LAST RESORT tool - try to use examples first.`,
+  description: `Get list of available tables with name and description only. Use this tool first to see what tables exist and what they are for.`,
   parameters: z.object({}),
   execute: async () => {
     logger.info(`🔧 TOOL CALLED: get_table_list`);
 
     try {
-      // Return table metadata from config
       const tablesInfo = TABLE_METADATA.map((table) => ({
         name: table.name,
         description: table.description,
-        important_fields: table.importantFields,
       }));
-
       const result = JSON.stringify(tablesInfo, null, 2);
       logger.info(`   Found ${tablesInfo.length} tables`);
       return result;
@@ -334,14 +328,54 @@ This is a LAST RESORT tool - try to use examples first.`,
 });
 
 /**
+ * Get important fields for selected tables. Call after get_table_list when you need more detail on specific tables.
+ */
+export const getTablesImportantFieldsTool = tool({
+  name: 'get_tables_important_fields',
+  description: `Get name and important_fields for specified tables. Call this when you need more detail on selected tables (e.g. after get_table_list). Pass the table names you want details for.`,
+  parameters: z.object({
+    table_names: z.array(z.string()).describe('List of table names to get important fields for'),
+  }),
+  execute: async ({ table_names }: { table_names: string[] }) => {
+    logger.info(`🔧 TOOL CALLED: get_tables_important_fields`);
+    logger.info(`   Table Names: ${table_names.join(', ')}`);
+
+    try {
+      const resultMap: Record<string, { name: string; important_fields: string[] }> = {};
+      for (const tableName of table_names) {
+        const meta = TABLE_METADATA.find((t) => t.name === tableName);
+        if (meta) {
+          resultMap[tableName] = {
+            name: meta.name,
+            important_fields: meta.importantFields,
+          };
+        } else {
+          resultMap[tableName] = { name: tableName, important_fields: [] };
+        }
+      }
+      const result = JSON.stringify(resultMap, null, 2);
+      logger.info(`   Retrieved important fields for ${table_names.length} tables`);
+      return result;
+    } catch (error: any) {
+      const errorMessage = error?.message || String(error);
+      const errorStack = error?.stack || 'No stack trace available';
+      logger.error(`❌ Error getting tables important fields:`, {
+        message: errorMessage,
+        stack: errorStack,
+        error: error,
+      });
+      return `Error: ${errorMessage}`;
+    }
+  },
+});
+
+/**
  * Get table structure tool
  */
 export const getTableStructureTool = tool({
   name: 'get_table_structure',
-  description: `Get full column structure for specified tables.
-
-Use this tool ONLY after get_table_list if you need detailed column information.
-This is a LAST RESORT tool - try to use examples first.`,
+  description: `Get full column structure for specified tables (column names, types, nullable, defaults).
+Use when you need full column details (names, types, nullable, defaults) for query generation. Call get_table_list first; use get_tables_important_fields for important fields on selected tables, or get_table_structure for full schema from the database.`,
   parameters: z.object({
     table_names: z.array(z.string()).describe('List of table names to get structure for'),
   }),
