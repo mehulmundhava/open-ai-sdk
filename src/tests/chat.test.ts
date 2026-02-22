@@ -64,9 +64,10 @@ export async function testChatEndpoint(): Promise<boolean> {
     logger.info(`   Question: ${testRequest.question}`);
     logger.info(`   User ID: ${testRequest.user_id}`);
 
-    // Process the chat request
+    // Process the chat request (chatId required by processChat)
+    const testChatId = 'test-chat-id';
     const startTime = Date.now();
-    const response = await processChat(testRequest, vectorStore);
+    const response = await processChat(testChatId, testRequest, vectorStore);
     const elapsedTime = Date.now() - startTime;
 
     logger.info('📥 Received chat response');
