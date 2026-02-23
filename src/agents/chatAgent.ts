@@ -92,7 +92,7 @@ function buildStaticPromptPrefix(isJourney: boolean = false): string {
     - High temperature alert = max temperature (type 1 or max_temperature_event_time). Low temperature alert = min temperature (type 0 or min_temperature_event_time). Battery alert = battery (battery_event_time).
     - Two ways to implement:
       (1) device_alerts (simpler, "last alert in window"): Join device_alerts. Filter by event time in window, e.g. for "high temp alert in last 1 day": JOIN device_alerts da ON da.device_id = cd.device_id WHERE da.max_temperature_event_time >= NOW() - INTERVAL '1 day'. For low temp use min_temperature_event_time; for battery use battery_event_time.
-      (2) device_temperature_alert (accurate, "any alert overlapping window"): Join device_temperature_alert. type: 0 = min temp, 1 = max (high) temp. For "alert in last 1 day" require the alert interval to overlap the window: window_start = NOW() - INTERVAL '1 day', window_end = NOW(); use WHERE dta.type = 1 (for high) AND dta.start_time <= window_end AND (dta.end_time >= window_start OR dta.end_time IS NULL) and status = 1. Use this when the question implies "reported an alert during the period" (any occurrence in the window).
+      (2) device_temperature_alert (accurate, "any alert overlapping window"): Join device_temperature_alert. type: 0 = min-temp, 1 = max (high) temp. For "alert in last 1 day" require the alert interval to overlap the window: window_start = NOW() - INTERVAL '1 day', window_end = NOW(); use WHERE dta.type = 1 (for high) AND dta.start_time <= window_end AND (dta.end_time >= window_start OR dta.end_time IS NULL) and status = 1. Use this when the question implies "reported an alert during the period" (any occurrence in the window).
     - Example: "How many devices in USA reported high temperature alert in last 1 day" = get_area_bounds({ country: "United States" }), then COUNT DISTINCT devices from device_current_data cd JOIN user_device_assignment ud ON ud.device = cd.device_id JOIN area_bounds ab ON ab.id = <area_bound_id> AND ST_Contains(ab.boundary, ST_SetSRID(ST_MakePoint(cd.longitude, cd.latitude), 4326)) JOIN device_temperature_alert dta ON dta.device_id = cd.device_id AND dta.type = 1 AND dta.start_time <= NOW() AND (dta.end_time >= NOW() - INTERVAL '1 day' OR dta.end_time IS NULL) WHERE ud.user_id = '<user_id>'. Alternatively with device_alerts: JOIN device_alerts da ON da.device_id = cd.device_id WHERE da.max_temperature_event_time >= NOW() - INTERVAL '1 day'.
 
     Important Field Notes:
@@ -419,9 +419,9 @@ export async function runChatAgent(
     }
     const previousResponseId = ai_chat?.previous_response_id || null;
     const lastMessage = await AiChatMessage.findOne({ where: { chat_id: chatId }, order: [['created_at', 'DESC']], raw: true });
-    console.log('-----> lastMessage:', lastMessage);
+    // console.log('-----> lastMessage:', lastMessage);
 
-    const previousHistory = (lastMessage?.history || []).slice(-30);
+    const previousHistory =lastMessage?.history || []; //(lastMessage?.history || []).slice(-30);
     let thread: AgentInputItem[] = previousHistory as AgentInputItem[];
 
     // console.log('-----> previousResponseId:', previousResponseId);
