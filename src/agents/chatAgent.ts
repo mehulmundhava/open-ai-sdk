@@ -11,8 +11,8 @@ import {
   getTableListTool,
   getTablesImportantFieldsTool,
   getTableStructureTool,
-  journeyListTool,
-  journeyCountTool,
+  FacilityJourneyListTool,
+  FacilityJourneyCountTool,
   getAreaBoundsTool,
 } from './tools';
 import { logger } from '../utils/logger';
@@ -33,10 +33,10 @@ export interface ChatAgentConfig {
  */
 function buildStaticPromptPrefix(isJourney: boolean = false): string {
   const toolsList = isJourney
-    ? 'journey_list_tool, journey_count_tool, count_query, list_query, execute_db_query, get_table_list, get_tables_important_fields, get_table_structure, get_area_bounds'
-    : 'count_query, list_query, execute_db_query, get_table_list, get_tables_important_fields, get_table_structure, journey_list_tool, journey_count_tool, get_area_bounds';
+    ? 'count_query, list_query, execute_db_query, get_table_list, get_tables_important_fields, get_table_structure, get_area_bounds, facility_journey_list_tool, facility_journey_count_tool'
+    : 'count_query, list_query, execute_db_query, get_table_list, get_tables_important_fields, get_table_structure, get_area_bounds, facility_journey_list_tool, facility_journey_count_tool';
   const workflowDesc = isJourney
-    ? 'Journey between facilities question? → journey_list_tool or journey_count_tool'
+    ? 'Facility wise Journey between facilities question? → facility_journey_list_tool or facility_journey_count_tool'
     : 'Generate SQL → Use count_query for COUNT, list_query for LIST, execute_db_query for others';
 
   // Build comprehensive static knowledge base to exceed 1024 tokens
@@ -129,7 +129,7 @@ function buildStaticPromptPrefix(isJourney: boolean = false): string {
 
     Journey between facilities Calculation Rules:
     - Journey between facilities = device movement from one facility_id to another facility_id
-    - Journey between facilities calculations use specialized tools (journey_list_tool, journey_count_tool)
+    - Journey between facilities calculations use specialized tools (facility_journey_list_tool, facility_journey_count_tool)
     - These tools execute SQL to fetch geofencing rows, then run algorithm to calculate journeys between facilities
     - Journey time must be >= 4 hours (14400 seconds) between different facilities
     - For same facility (A -> A), minimum time is 4 hours + extraJourneyTimeLimit (if provided)
@@ -320,8 +320,8 @@ export async function createChatAgent(config: ChatAgentConfig): Promise<Agent> {
       getTableListTool,
       getTablesImportantFieldsTool,
       getTableStructureTool,
-      journeyListTool,
-      journeyCountTool,
+      FacilityJourneyListTool,
+      FacilityJourneyCountTool,
       getAreaBoundsTool,
     ] as any,
   });

@@ -499,9 +499,9 @@ function parseSqlResultToGeofencingRows(result: any): GeofencingRow[] {
 /**
  * Journey list tool - calculates journey list from geofencing data
  */
-export const journeyListTool = tool({
-  name: 'journey_list_tool',
-  description: `Calculate journey list from geofencing data. For journey/movement questions only.
+export const FacilityJourneyListTool = tool({
+  name: 'facility_journey_list_tool',
+  description: `get the facility journey list from geofencing data. For facility wise journey/movement questions only.
 
 SQL MUST use: device_geofencings dg, JOIN user_device_assignment uda ON uda.device = dg.device_id
 Select: dg.device_id, dg.facility_id, dg.facility_type, dg.entry_event_time, dg.exit_event_time
@@ -510,7 +510,7 @@ Order: ORDER BY dg.entry_event_time ASC
 This tool:
 1. Executes SQL to fetch raw geofencing rows
 2. Runs journey calculation algorithm in TypeScript
-3. Returns structured journey list (NOT raw SQL rows)
+3. Returns structured facility journey list (NOT raw SQL rows)
 4. Generates CSV for large results (>3 journeys)`,
   parameters: z.object({
     sql: z.string().describe('SELECT query to fetch geofencing rows. MUST NOT include LIMIT clause.'),
@@ -525,7 +525,7 @@ This tool:
   }),
   execute: async ({ sql, params }: { sql: string; params?: { from_facility?: string | null; extraJourneyTimeLimit?: number | null } | null }) => {
     const toolCallId = `tool_${Date.now()}_${Math.random().toString(36).substring(7)}`;
-    logger.info(`🔧 TOOL CALLED: journey_list_tool [${toolCallId}]`, {
+    logger.info(`🔧 TOOL CALLED: facility_journey_list_tool [${toolCallId}]`, {
       toolCallId,
       sqlQuery: sql,
       params,
@@ -606,9 +606,9 @@ This tool:
 /**
  * Journey count tool - calculates journey counts from geofencing data
  */
-export const journeyCountTool = tool({
-  name: 'journey_count_tool',
-  description: `Calculate journey counts. For "how many journeys" questions only.
+export const FacilityJourneyCountTool = tool({
+  name: 'facility_journey_count_tool',
+  description: `get the facility journey counts from geofencing data. For facility wise "how many journeys" questions only.
 
 SQL MUST use: device_geofencings dg, JOIN user_device_assignment uda ON uda.device = dg.device_id
 Select: dg.device_id, dg.facility_id, dg.facility_type, dg.entry_event_time, dg.exit_event_time
@@ -630,7 +630,7 @@ This tool:
   }),
   execute: async ({ sql, params }: { sql: string; params?: { extraJourneyTimeLimit?: number | null } | null }) => {
     const toolCallId = `tool_${Date.now()}_${Math.random().toString(36).substring(7)}`;
-    logger.info(`🔧 TOOL CALLED: journey_count_tool [${toolCallId}]`, {
+    logger.info(`🔧 TOOL CALLED: facility_journey_count_tool [${toolCallId}]`, {
       toolCallId,
       sqlQuery: sql,
       params,
@@ -641,7 +641,7 @@ This tool:
       // Validate SQL is SELECT only
       const sqlUpper = sql.trim().toUpperCase();
       if (!sqlUpper.startsWith('SELECT')) {
-        const errorMsg = 'Only SELECT queries are allowed for journey calculations';
+        const errorMsg = 'Only SELECT queries are allowed for facility journey calculations';
         logger.error(`   ❌ ${errorMsg}`);
         return errorMsg;
       }

@@ -274,7 +274,7 @@ export async function processChat(
 
     // Also check journey tools for SQL
     const journeyToolCall = result.toolCalls?.find(
-      (tc: ToolCallItem) => tc.tool === 'journey_list_tool' || tc.tool === 'journey_count_tool'
+      (tc: ToolCallItem) => tc.tool === 'facility_journey_list_tool' || tc.tool === 'facility_journey_count_tool'
     );
     const journeyToolSql = journeyToolCall?.input?.sql;
 

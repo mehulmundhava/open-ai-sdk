@@ -264,10 +264,10 @@ export class AgentResponseProcessor {
     const toolName = this.mapFunctionNameToTool(functionName, parsedArgs);
     
     // Handle journey tools (they use 'sql' parameter, not 'query')
-    if (toolName === 'journey_list_tool' || toolName === 'journey_count_tool') {
+    if (toolName === 'facility_journey_list_tool' || toolName === 'facility_journey_count_tool') {
       const sqlStr = parsedArgs.sql || '';
       if (sqlStr && typeof sqlStr === 'string') {
-        logger.info(`📝 Journey tool SQL detected: ${toolName} - ${sqlStr.substring(0, 100)}`);
+        logger.info(`📝 Facility Journey tool SQL detected: ${toolName} - ${sqlStr.substring(0, 100)}`);
         // Journey tools are executed by the framework, so we just return the tool call info
         // The actual execution happens in the tool itself
         return {
@@ -815,7 +815,7 @@ export class AgentResponseProcessor {
       }
       // Handle journey tools (they use 'sql' parameter)
       if (
-        (toolCall.tool === 'journey_list_tool' || toolCall.tool === 'journey_count_tool') &&
+        (toolCall.tool === 'facility_journey_list_tool' || toolCall.tool === 'facility_journey_count_tool') &&
         input?.sql
       ) {
         if (!sqlQuery) sqlQuery = input.sql;
