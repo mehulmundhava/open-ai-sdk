@@ -171,7 +171,7 @@ export const TABLE_METADATA: TableMetadata[] = [
   },
   {
     name: 'sensor',
-    description: 'Stores sensor readings including temperature, battery, and shock data. Links to incoming messages via imt_id',
+    description: 'Stores sensor readings including temperature,battery, and event_time.',
     importantFields: [
       'id (PRIMARY KEY)',
       'imt_id (UNIQUE, links to incoming_message_history_k.imt_id)',
@@ -184,12 +184,17 @@ export const TABLE_METADATA: TableMetadata[] = [
   },
   {
     name: 'shock_info',
-    description: 'Full history of shock/free-fall events (one row per event). For "list of devices that experienced shock after [date]" or "who and when" use device_current_data.shock_event_time instead - do NOT join shock_info for that (table is large and query will timeout).',
+    description: 'Full history of shock/free-fall events (one row per event). For "list of devices that experienced shock after [date]" or "who and when" use device_current_data.shock_event_time instead - do NOT join shock_info for that (table is large and query will timeout). field : id,device_id,type(shock,free_fall),time_stamp(timestamp),imt_k_id(integer, links to incoming_message_history_k.sno),latitude(float),longitude(float),location_event_time(timestamp)',
     importantFields: [
       'id (PRIMARY KEY)',
       'device_id (string, links to device_details_table.device_id or other-table.device_id)',
       'type (string, eg. shock, free_fall)',
       'time_stamp (timestamp, event time)',
+      'imt_k_id (integer, links to incoming_message_history_k.sno)',
+      'latitude (float)',
+      'longitude (float)',
+      'location_event_time (timestamp)',
+
     ],
   },
   {
@@ -205,7 +210,7 @@ export const TABLE_METADATA: TableMetadata[] = [
   },
   {
     name: 'device_temperature_alert',
-    description: 'Stores temperature alert history with device_id,start_time,end_time,type(0=min,1=max),threshold_value(min or max allowed value),threshold_duration( minimum duration in seconds to generate alert),status(0=inactive,1=active).',
+    description: 'Stores temperature alert history with alert-location and location-event-time . field : device_id,start_time,end_time,type(0=min,1=max),threshold_value(min or max allowed value),threshold_duration( minimum duration in seconds to generate alert),status(0=inactive,1=active), location_event_time(timestamp),latitude,longitude.',
     importantFields: [
       'id (PRIMARY KEY)',
       'device_id (string, links to device_details_table.device_id or other-table.device_id)',
@@ -215,6 +220,10 @@ export const TABLE_METADATA: TableMetadata[] = [
       'threshold_value(float, min or max allowed value for temperature)',
       'threshold_duration( integer, minimum duration in seconds to generate alert)',
       'status(integer, 0=inactive,1=active)',
+      'imt_k_id (integer, links to incoming_message_history_k.sno)',
+      'latitude (float)',
+      'longitude (float)',
+      'location_event_time (timestamp)',
     ],
   },
 ];
