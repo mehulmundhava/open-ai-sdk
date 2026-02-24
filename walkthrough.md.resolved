@@ -1,0 +1,64 @@
+# Custom Script Tool — Implementation Walkthrough
+
+## Summary
+
+Added a new `custom_script_tool` to the OpenAI Agents SDK that allows the LLM to generate and execute JavaScript code for complex multi-table queries that can't be expressed in a single SQL query.
+
+## Changes Made
+
+### New File
+
+| File | Purpose |
+|------|---------|
+| [customScriptRunner.ts](file:///c:/xampp/htdocs/ship-ai-dev/open-ai-sdk/src/services/customScriptRunner.ts) | Sandboxed vm executor with [runQuery()](file:///c:/xampp/htdocs/ship-ai-dev/open-ai-sdk/src/services/customScriptRunner.ts#120-156) API, security validations, timeout |
+
+### Modified Files
+
+| File | Changes |
+|------|---------|
+| [tools.ts](file:///c:/xampp/htdocs/ship-ai-dev/open-ai-sdk/src/agents/tools.ts) | Added `customScriptTool` export with full LLM instructions + example |
+| [chatAgent.ts](file:///c:/xampp/htdocs/ship-ai-dev/open-ai-sdk/src/agents/chatAgent.ts) | Imported tool, registered in agent tools array, added prompt instructions |
+| [agentResponseProcessor.ts](file:///c:/xampp/htdocs/ship-ai-dev/open-ai-sdk/src/utils/agentResponseProcessor.ts) | Added `custom_script_tool` to function name mapper |
+
+## Architecture
+
+```mermaid
+flowchart TD
+    A["User Question"] --> B["Security Check"]
+    B --> C["RAG Vector Search"]
+    C --> D["Build Prompt + Run LLM"]
+    D --> E{"LLM decides tool"}
+    E -->|Simple SQL| F["count_query / list_query"]
+    E -->|Journey| G["facility_journey_*_tool"]
+    E -->|Complex multi-table| H["custom_script_tool"]
+    H --> I["customScriptRunner.ts"]
+    I --> J["vm.runInNewContext()"]
+    J -->|"runQuery(sql)"| K["DatabaseService (read-only)"]
+    K --> J
+    J -->|"result"| H
+    H --> L["Return to LLM"]
+```
+
+## Security Protections
+
+- **Read-only DB**: Scripts only use `sequelizeReadOnly`
+- **SELECT-only**: Every SQL query validated before execution
+- **30s timeout**: Both synchronous (vm) and async (Promise.race)
+- **20 query limit**: Max queries per script execution
+- **500KB result cap**: Prevents memory issues
+- **Sandbox escape checks**: Blocks `require`, `import`, [process](file:///c:/xampp/htdocs/ship-ai-dev/open-ai-sdk/src/controllers/chatController.ts#109-408), `global`, `eval`, [Function()](file:///c:/xampp/htdocs/ship-ai-dev/open-ai-sdk/src/utils/agentResponseProcessor.ts#364-389), etc.
+
+## Verification
+
+- ✅ `npx tsc --noEmit` — **zero errors**
+
+## How to Test
+
+Run the dev server and ask a question like:
+
+> *"List devices that had journeys in the last 30 days where a temperature alert occurred during the journey"*
+
+The LLM should use `custom_script_tool` to:
+1. Query `device_geofencings` for journeys
+2. For each journey, query `device_temperature_alert` for overlapping alerts
+3. Return combined results

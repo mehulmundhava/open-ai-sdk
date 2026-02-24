@@ -160,8 +160,8 @@ export class AgentResponseProcessor {
       const toolError = obj.error;
 
       // Check if already added
-      const exists = toolCalls.some(tc => 
-        tc.tool === toolName && 
+      const exists = toolCalls.some(tc =>
+        tc.tool === toolName &&
         JSON.stringify(tc.input) === JSON.stringify(toolInput)
       );
 
@@ -192,7 +192,7 @@ export class AgentResponseProcessor {
     logger.debug('🔍 Extracting tool calls from steps array');
     for (const step of steps) {
       const stepAny = step as any;
-      
+
       if (stepAny.type === 'tool-call' || stepAny.toolCall || stepAny.tool) {
         const toolName = stepAny.tool?.name || stepAny.toolCall?.tool?.name || 'unknown';
         const toolInput = stepAny.toolCall?.input || stepAny.input || stepAny.args;
@@ -222,13 +222,13 @@ export class AgentResponseProcessor {
     toolCalls: ToolCallInfo[]
   ): Promise<void> {
     logger.debug('🔍 Extracting tool calls from state.modelResponses');
-    
+
     for (const modelResponse of modelResponses) {
       if (modelResponse.output && Array.isArray(modelResponse.output)) {
         for (const outputItem of modelResponse.output) {
           if (outputItem.providerData?.tool_calls && Array.isArray(outputItem.providerData.tool_calls)) {
             logger.info(`🔧 Found ${outputItem.providerData.tool_calls.length} tool call(s) in providerData`);
-            
+
             for (const toolCall of outputItem.providerData.tool_calls) {
               try {
                 const toolCallInfo = await this.parseAndExecuteToolCall(toolCall);
@@ -256,13 +256,13 @@ export class AgentResponseProcessor {
   private async parseAndExecuteToolCall(toolCall: any): Promise<ToolCallInfo | null> {
     const functionName = toolCall.function?.name || toolCall.name || 'unknown';
     const functionArgs = toolCall.function?.arguments || toolCall.arguments || '{}';
-    
+
     // Parse arguments
     const parsedArgs = this.parseToolArguments(functionArgs);
-    
+
     // Map function name to tool name
     const toolName = this.mapFunctionNameToTool(functionName, parsedArgs);
-    
+
     // Handle journey tools (they use 'sql' parameter, not 'query')
     if (toolName === 'facility_journey_list_tool' || toolName === 'facility_journey_count_tool') {
       const sqlStr = parsedArgs.sql || '';
@@ -279,15 +279,15 @@ export class AgentResponseProcessor {
         };
       }
     }
-    
+
     // Extract and execute SQL query if present (for regular SQL tools)
     if (parsedArgs.query && typeof parsedArgs.query === 'string') {
       const queryStr: string = parsedArgs.query;
       logger.info(`📝 SQL Query detected in tool call: ${toolName} - ${queryStr.substring(0, 100)}`);
-      
+
       try {
         const toolOutput = await this.executeQuery(toolName, queryStr);
-        
+
         return {
           tool: toolName,
           input: parsedArgs,
@@ -301,7 +301,7 @@ export class AgentResponseProcessor {
           error: errorMessage,
           stack: error?.stack,
         });
-        
+
         return {
           tool: toolName,
           input: parsedArgs,
@@ -311,13 +311,13 @@ export class AgentResponseProcessor {
         };
       }
     }
-    
+
     // For other tools without query/sql, just return the tool call info
     logger.debug(`Tool call detected: ${toolName}`, {
       functionName,
       arguments: parsedArgs,
     });
-    
+
     return {
       tool: toolName,
       input: parsedArgs,
@@ -380,8 +380,10 @@ export class AgentResponseProcessor {
       return 'count_query';
     } else if (functionName === 'list_query' || functionName === 'listQuery') {
       return 'list_query';
+    } else if (functionName === 'custom_script_tool' || functionName === 'customScriptTool') {
+      return 'custom_script_tool';
     }
-    
+
     return functionName;
   }
 
@@ -391,9 +393,9 @@ export class AgentResponseProcessor {
   private async executeQuery(toolName: string, queryStr: string): Promise<any> {
     const { DatabaseService } = await import('../services/database');
     const dbService = new DatabaseService();
-    
+
     logger.info(`🔧 Executing ${toolName} query`);
-    
+
     if (toolName === 'count_query') {
       return await dbService.executeCountQuery(queryStr);
     } else if (toolName === 'list_query') {
@@ -418,19 +420,19 @@ export class AgentResponseProcessor {
   private extractFromStateToolCalls(state: any, toolCalls: ToolCallInfo[]): void {
     logger.debug('🔍 Extracting executed tool calls from state');
     const executedCalls = state.toolCalls || state.toolResults || [];
-    
+
     for (const executedCall of executedCalls) {
       const toolName = executedCall.tool?.name || executedCall.name || 'unknown';
       const toolInput = executedCall.input || executedCall.args || executedCall.arguments;
       const toolOutput = executedCall.result || executedCall.output;
       const toolError = executedCall.error;
-      
+
       // Check if this tool call already exists (avoid duplicates)
-      const existingCall = toolCalls.find(tc => 
-        tc.tool === toolName && 
+      const existingCall = toolCalls.find(tc =>
+        tc.tool === toolName &&
         JSON.stringify(tc.input) === JSON.stringify(toolInput)
       );
-      
+
       if (!existingCall) {
         toolCalls.push({
           tool: toolName,
@@ -488,7 +490,7 @@ export class AgentResponseProcessor {
     try {
       const tokens = TokenTracker.fromAgentsUsage(usage);
       this.tokenTracker.recordStage(stage, tokens);
-      
+
       // Log cached tokens if available
       const cachedTokens = tokens.cachedTokens || tokens.promptTokensDetails?.cached_tokens || 0;
       const logData: any = {
@@ -496,14 +498,14 @@ export class AgentResponseProcessor {
         completionTokens: tokens.completionTokens,
         totalTokens: tokens.totalTokens,
       };
-      
+
       if (cachedTokens > 0) {
         logData.cachedTokens = cachedTokens;
-        logData.cacheHitRate = tokens.promptTokens > 0 
+        logData.cacheHitRate = tokens.promptTokens > 0
           ? `${((cachedTokens / tokens.promptTokens) * 100).toFixed(2)}%`
           : '0%';
       }
-      
+
       logger.debug(`Token usage [${stage}]:`, logData);
       return true;
     } catch (error) {
@@ -621,7 +623,7 @@ export class AgentResponseProcessor {
    */
   private extractAnswer(result: any): string {
     let answer = String(result.finalOutput || 'No answer generated');
-    
+
     if (!result.finalOutput) {
       logger.warn('⚠️  Agent returned no final output');
     }
@@ -713,35 +715,35 @@ export class AgentResponseProcessor {
     let sanitized = answer;
 
     // Check if answer contains valid JSON (journey results, CSV links, etc.) - don't sanitize these
-    const hasValidJson = answer.includes('"journies"') || 
-                        answer.includes('"facilities_details"') ||
-                        answer.includes('CSV Download Link') ||
-                        answer.includes('csv_id') ||
-                        answer.includes('download-csv');
-    
+    const hasValidJson = answer.includes('"journies"') ||
+      answer.includes('"facilities_details"') ||
+      answer.includes('CSV Download Link') ||
+      answer.includes('csv_id') ||
+      answer.includes('download-csv');
+
     // Check if answer contains technical details (but not valid JSON results)
     const hasTechnicalDetails = !hasValidJson && technicalPatterns.some(pattern => pattern.test(answer));
 
     if (hasTechnicalDetails) {
       logger.warn('⚠️  Answer contains technical details, sanitizing...');
-      
+
       // Replace technical error messages with user-friendly ones
       sanitized = answer
         // Remove references to specific tables and columns
-        .replace(/because\s+the\s+[\w\s]+(?:table|column|information)\s+is\s+not\s+available[^.]*/gi, 
+        .replace(/because\s+the\s+[\w\s]+(?:table|column|information)\s+is\s+not\s+available[^.]*/gi,
           'because the requested information is not available')
-        .replace(/longitude\s+information\s+is\s+not\s+available[^.]*/gi, 
+        .replace(/longitude\s+information\s+is\s+not\s+available[^.]*/gi,
           'location information is not available')
         .replace(/in\s+the\s+[\w_]+\s+table[^.]*/gi, 'in the system')
         .replace(/using\s+the\s+available\s+columns[^.]*/gi, 'with the available data')
-        .replace(/column\s+[\w_]+\s+does\s+not\s+exist[^.]*/gi, 
+        .replace(/column\s+[\w_]+\s+does\s+not\s+exist[^.]*/gi,
           'the requested information is not available')
-        .replace(/relation\s+["']?[\w_]+["']?\s+does\s+not\s+exist[^.]*/gi, 
+        .replace(/relation\s+["']?[\w_]+["']?\s+does\s+not\s+exist[^.]*/gi,
           'the requested information is not available')
         // Remove technical explanations
-        .replace(/Unfortunately,\s+this\s+means\s+I\s+can't\s+directly\s+perform\s+a\s+[\w\s]+filter[^.]*/gi, 
+        .replace(/Unfortunately,\s+this\s+means\s+I\s+can't\s+directly\s+perform\s+a\s+[\w\s]+filter[^.]*/gi,
           'Unfortunately, I cannot process this request with the available data')
-        .replace(/If\s+you\s+have\s+any\s+other\s+questions[^.]*/gi, 
+        .replace(/If\s+you\s+have\s+any\s+other\s+questions[^.]*/gi,
           'If you have any other questions, please let me know!');
 
       // If the sanitized answer still looks too technical, provide a generic message
@@ -762,7 +764,7 @@ export class AgentResponseProcessor {
   /**
    * Normalize tool input: SDK may pass input as JSON string (e.g. "{\"query\":\"SELECT ...\"}").
    */
-  private normalizeToolInput(input: any): { query?: string; sql?: string; [k: string]: any } | undefined {
+  private normalizeToolInput(input: any): { query?: string; sql?: string;[k: string]: any } | undefined {
     if (input == null) return undefined;
     if (typeof input === 'object' && (input.query != null || input.sql != null)) return input;
     if (typeof input !== 'string') return input;
@@ -808,8 +810,8 @@ export class AgentResponseProcessor {
             ? toolCall.output
             : toolCall.output != null
               ? (typeof (toolCall.output as any).text === 'string'
-                  ? (toolCall.output as any).text
-                  : JSON.stringify(toolCall.output))
+                ? (toolCall.output as any).text
+                : JSON.stringify(toolCall.output))
               : undefined;
         if (out !== undefined && out !== '') queryResult = out;
       }
