@@ -1,11 +1,12 @@
 import { ChatRequest, ChatResponse } from '../models/schemas';
 import { createChatAgent, runChatAgent } from '../agents/chatAgent';
 import { VectorStoreService } from '../services/vectorStore';
-import { securityCheck } from '../utils/securityCheck';
+import { securityCheck, ChatHistoryEntry } from '../utils/securityCheck';
 import { TokenTracker } from '../utils/tokenTracker';
 import { logger, createRequestLogger } from '../utils/logger';
 import { v4 as uuidv4 } from 'uuid';
 import { AiChat, AiChatMessage } from '../models';
+import { getAiModelName } from '../config/aiSettings';
 
 /** Strip localhost or any origin from download-csv URLs so response never exposes API base URL. */
 function stripLocalhostFromCsvLinks(text: string): string {
@@ -93,16 +94,16 @@ function buildToolsUsedWithTokens(result: { toolCalls?: Array<{ tool: string; in
  */
 function normalizeSqlQuery(sqlQuery: string | undefined): string | undefined {
   if (!sqlQuery) return undefined;
-  
+
   // Replace line breaks (\n, \r\n, \r) with spaces
   let normalized = sqlQuery.replace(/\r\n/g, ' ').replace(/\n/g, ' ').replace(/\r/g, ' ');
-  
+
   // Replace multiple consecutive spaces with a single space
   normalized = normalized.replace(/\s+/g, ' ');
-  
+
   // Trim leading and trailing whitespace
   normalized = normalized.trim();
-  
+
   return normalized;
 }
 
@@ -153,7 +154,31 @@ export async function processChat(
   let securityFailureReason: string | undefined;
   if (userId && userId.toLowerCase() !== 'admin') {
     try {
-      const securityResult = await securityCheck(payload.question, userId);
+      // Fetch recent chat history from DB to give the security guard context
+      // This is critical for follow-up replies (e.g. "A->shock alert") to be understood correctly
+      let securityChatHistory: ChatHistoryEntry[] = [];
+      try {
+        const recentMessages = await AiChatMessage.findAll({
+          where: { chat_id: chatId },
+          order: [['created_at', 'DESC']],
+          limit: 5,
+          attributes: ['user_message', 'response_message'],
+          raw: true,
+        }) as any[];
+        // Reverse so history is oldest-first, then flatten into user/assistant pairs
+        securityChatHistory = recentMessages.reverse().flatMap((msg: any) => {
+          const entries: ChatHistoryEntry[] = [];
+          if (msg.user_message) entries.push({ role: 'user', content: msg.user_message });
+          if (msg.response_message) entries.push({ role: 'assistant', content: msg.response_message.substring(0, 300) });
+          return entries;
+        });
+      } catch (histErr: any) {
+        requestLogger.warn('⚠️  Could not fetch chat history for security check (continuing without it)', {
+          error: histErr?.message,
+        });
+      }
+
+      const securityResult = await securityCheck(payload.question, userId, securityChatHistory);
       if (!securityResult.allowed) {
         securityFailureReason = securityResult.reason || 'Query blocked by security check';
         requestLogger.warn(`🔒 Security check BLOCKED query`, {
@@ -161,7 +186,7 @@ export async function processChat(
           question: payload.question,
           reason: securityFailureReason,
         });
-        
+
         const securityBlockedResponse: ChatResponse = {
           token_id: payload.token_id,
           answer: `Sorry, I cannot process that request. ${securityFailureReason}`,
@@ -269,8 +294,8 @@ export async function processChat(
       (tc: ToolCallItem) => tc.tool === 'execute_db_query'
     );
     const executeDbQuerySql = executeDbQueryCall?.input?.query ||
-                              (executeDbQueryCall?.input?.sql ? executeDbQueryCall.input.sql : undefined) ||
-                              result.sqlQuery;
+      (executeDbQueryCall?.input?.sql ? executeDbQueryCall.input.sql : undefined) ||
+      result.sqlQuery;
 
     // Also check journey tools for SQL
     const journeyToolCall = result.toolCalls?.find(
@@ -287,6 +312,9 @@ export async function processChat(
     // Normalize SQL query (remove line breaks and extra whitespace)
     const normalizedSqlQuery = normalizeSqlQuery(result.sqlQuery);
 
+    // Model name from DB (same source as agent) for accurate llm_type in response
+    const aiModelName = await getAiModelName();
+
     // Build response
     const response: ChatResponse = {
       token_id: payload.token_id,
@@ -294,7 +322,7 @@ export async function processChat(
       sql_query: normalizedSqlQuery,
       results: result.queryResult ? { raw: result.queryResult } : undefined,
       llm_used: true,
-      llm_type: 'OPENAI/gpt-4o',
+      llm_type: `OPENAI/${aiModelName}`,
       csv_id: result.csvId,
       csv_download_path: result.csvDownloadPath,
       debug: {
@@ -315,7 +343,7 @@ export async function processChat(
         },
       },
     };
-    
+
     // Log tool errors if any
     if (result.toolErrors && result.toolErrors.length > 0) {
       requestLogger.error('❌ Tool errors detected:', {
@@ -324,7 +352,7 @@ export async function processChat(
         tool_calls: result.toolCalls,
       });
     }
-    
+
     // Log if SQL query is missing
     if (!result.sqlQuery && result.toolCalls && result.toolCalls.length > 0) {
       requestLogger.warn('⚠️  SQL query not extracted from tool calls', {
@@ -344,7 +372,7 @@ export async function processChat(
         response_message: processedAnswer,
         response: response, // Full response object as JSONB
         token_consumption: result.tokenUsage || null, // Token usage data as JSONB
-        history : result.history || null,
+        history: result.history || null,
       });
       requestLogger.info('✅ Saved chat message to database', {
         chatId,
@@ -366,7 +394,7 @@ export async function processChat(
       name: error?.name || 'UnknownError',
     };
     requestLogger.error('❌ Error processing chat:', errorDetails);
-    
+
     // Build error response
     const errorResponse: ChatResponse = {
       token_id: payload.token_id,

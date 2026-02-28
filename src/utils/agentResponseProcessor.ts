@@ -61,10 +61,17 @@ export class AgentResponseProcessor {
     // Extract answer
     const answer = this.extractAnswer(result);
 
+    // PRIMARY: Extract SQL directly from the raw history messages of the CURRENT turn only.
+    // state.toolCalls spans the ENTIRE conversation history, causing old queries from prior
+    // messages to pollute extraction. result.history is chronological, so we can isolate
+    // only tool calls that happened AFTER the last user message.
+    const sqlFromHistory = this.extractSqlFromHistory(result);
+
     // Extract SQL query and results
     const { sqlQuery, queryResult, csvId, csvDownloadPath } = await this.extractQueryInfo(
       toolCalls,
-      answer
+      answer,
+      sqlFromHistory
     );
 
     // Fix CSV download links: LLM sometimes outputs sandbox:/download-csv/... (invalid); replace with full API URL
@@ -85,6 +92,84 @@ export class AgentResponseProcessor {
       toolCalls,
       toolErrors,
     };
+  }
+
+  /**
+   * Extract the SQL query for the CURRENT turn directly from result.history.
+   *
+   * Walks the raw message history in REVERSE order. Skips the final assistant message,
+   * then collects SQL tool_call arguments until it hits the last user message (the
+   * boundary between the current turn and all previous turns).
+   * Among those current-turn tool calls, prefers geographic/data queries over helpers.
+   */
+  private extractSqlFromHistory(result: any): string | undefined {
+    const SQL_TOOLS = new Set([
+      'execute_db_query', 'count_query', 'list_query',
+      'facility_journey_list_tool', 'facility_journey_count_tool',
+    ]);
+
+    const history: any[] = result?.history;
+    if (!Array.isArray(history) || history.length === 0) return undefined;
+
+    const currentTurnCandidates: Array<{ query: string; tool: string }> = [];
+    let passedFinalAssistant = false;
+
+    for (let i = history.length - 1; i >= 0; i--) {
+      const msg = history[i];
+      if (!msg) continue;
+
+      // Skip the very last assistant message (final answer, no tool calls)
+      if (!passedFinalAssistant && msg.role === 'assistant') {
+        passedFinalAssistant = true;
+        continue;
+      }
+
+      // Stop when we reach the user message that started this turn
+      if (msg.role === 'user') break;
+
+      // Collect SQL tool calls from assistant messages in the current turn
+      if (msg.role === 'assistant' && Array.isArray(msg.tool_calls)) {
+        for (const tc of msg.tool_calls) {
+          const name: string = tc?.function?.name ?? '';
+          if (!SQL_TOOLS.has(name)) continue;
+
+          let args: any = {};
+          try {
+            args = typeof tc.function?.arguments === 'string'
+              ? JSON.parse(tc.function.arguments)
+              : (tc.function?.arguments ?? {});
+          } catch { continue; }
+
+          // list_query / execute_db_query / count_query use `query`; journey tools use `sql`
+          const sql: string = args.query ?? args.sql ?? '';
+          if (sql && typeof sql === 'string' && sql.trim().toUpperCase().startsWith('SELECT')) {
+            currentTurnCandidates.push({ query: sql, tool: name });
+          }
+        }
+      }
+    }
+
+    if (currentTurnCandidates.length === 0) return undefined;
+
+    // Prefer geographic / data queries over simple helper queries (e.g. device list)
+    const movementPatterns = [
+      /incoming_message_history_k/i,
+      /ST_Contains/i,
+      /area_bounds/i,
+      /device_geofencings/i,
+      /device_temperature_alert/i,
+      /shock_info/i,
+    ];
+    const preferred = currentTurnCandidates.find(c =>
+      movementPatterns.some(p => p.test(c.query))
+    );
+
+    // Candidates were collected in reverse order; the last item is the last executed
+    const chosen = preferred ?? currentTurnCandidates[currentTurnCandidates.length - 1];
+    logger.info(`✅ SQL extracted from history (current turn): tool=${chosen.tool}`, {
+      sql: chosen.query.substring(0, 200),
+    });
+    return chosen.query;
   }
 
   /**
@@ -777,42 +862,52 @@ export class AgentResponseProcessor {
   }
 
   /**
-   * Extract SQL query and results from tool calls and answer
+   * Extract SQL query and results from tool calls and answer.
+   * When multiple tools run SQL (e.g. list_query for device list then list_query for movements),
+   * prefer the query that produced the main result (CSV / large result), not the first one.
+   *
+   * @param sqlFromHistory - SQL extracted directly from the current turn's history messages (highest priority)
    */
   private async extractQueryInfo(
     toolCalls: ToolCallInfo[],
-    answer: string
+    answer: string,
+    sqlFromHistory?: string
   ): Promise<{
     sqlQuery?: string;
     queryResult?: string;
     csvId?: string;
     csvDownloadPath?: string;
   }> {
-    let sqlQuery: string | undefined;
+    // If we have a reliable current-turn SQL from history parsing, use it directly.
+    // Still compute queryResult and csvId from the tool call outputs for completeness.
+    let sqlQuery: string | undefined = sqlFromHistory;
     let queryResult: string | undefined;
     let csvId: string | undefined;
     let csvDownloadPath: string | undefined;
 
-    // Extract from tool calls (do not break: sql query comes from one tool, result/CSV ID from another)
+    // Collect all SQL tool candidates (query/sql, output) so we can pick the one that produced the main result
+    type SqlCandidate = { query: string; output: string | undefined; tool: string };
+    const sqlCandidates: SqlCandidate[] = [];
+
     for (const toolCall of toolCalls) {
       const input = this.normalizeToolInput(toolCall.input);
-      // Handle regular SQL tools
+      const out =
+        typeof toolCall.output === 'string'
+          ? toolCall.output
+          : toolCall.output != null
+            ? (typeof (toolCall.output as any).text === 'string'
+              ? (toolCall.output as any).text
+              : JSON.stringify(toolCall.output))
+            : undefined;
+
+      // Handle regular SQL tools (execute_db_query, count_query, list_query)
       if (
         (toolCall.tool === 'execute_db_query' ||
           toolCall.tool === 'count_query' ||
           toolCall.tool === 'list_query') &&
         input?.query
       ) {
-        if (!sqlQuery) sqlQuery = input.query;
-        // Prefer result from a tool that actually has output (e.g. second list_query with CSV ID)
-        const out =
-          typeof toolCall.output === 'string'
-            ? toolCall.output
-            : toolCall.output != null
-              ? (typeof (toolCall.output as any).text === 'string'
-                ? (toolCall.output as any).text
-                : JSON.stringify(toolCall.output))
-              : undefined;
+        sqlCandidates.push({ query: input.query, output: out, tool: toolCall.tool });
         if (out !== undefined && out !== '') queryResult = out;
       }
       // Handle journey tools (they use 'sql' parameter)
@@ -820,37 +915,80 @@ export class AgentResponseProcessor {
         (toolCall.tool === 'facility_journey_list_tool' || toolCall.tool === 'facility_journey_count_tool') &&
         input?.sql
       ) {
-        if (!sqlQuery) sqlQuery = input.sql;
-        const out =
-          typeof toolCall.output === 'string'
-            ? toolCall.output
-            : toolCall.output != null
-              ? JSON.stringify(toolCall.output)
-              : undefined;
+        sqlCandidates.push({ query: input.sql, output: out, tool: toolCall.tool });
         if (out !== undefined && out !== '') queryResult = out;
+      }
+    }
+
+    // Extract CSV info from answer and queryResult first (needed to pick best SQL)
+    const extractCsvId = (text: string) => {
+      let match = text.match(/CSV ID:\s*([a-f0-9-]+)/i);
+      if (!match) {
+        match = text.match(/\/download-csv\/([a-f0-9-]+)/i);
+      }
+      return match ? match[1] : undefined;
+    };
+
+    csvId = extractCsvId(answer);
+    if (!csvId && queryResult) {
+      csvId = extractCsvId(queryResult);
+    }
+
+    if (csvId) {
+      csvDownloadPath = `/download-csv/${csvId}`;
+    }
+
+    // Choose sqlQuery from state tool calls ONLY when history-based extraction failed.
+    // (sqlFromHistory is already set if history was available — don't override it)
+    if (!sqlQuery && sqlCandidates.length > 0) {
+      const outputStr = (c: SqlCandidate) =>
+        c.output == null ? '' : typeof c.output === 'string' ? c.output : JSON.stringify(c.output);
+      if (csvId && sqlCandidates.length > 1) {
+        const withCsv = sqlCandidates.find((c) => {
+          const out = outputStr(c);
+          return out && (out.includes(csvId!) || out.includes('CSV ID:') || out.includes('Generated CSV'));
+        });
+        if (withCsv) {
+          sqlQuery = withCsv.query;
+        }
+      }
+      // If no CSV match: prefer query that looks like the main data query (movement/journey), not helper (device list)
+      if (!sqlQuery && sqlCandidates.length > 1) {
+        const movementPatterns = [
+          /incoming_message_history_k/i,
+          /ST_Contains/i,
+          /area_bounds/i,
+          /device_geofencings/i,
+        ];
+        const mainQuery = sqlCandidates.find((c) =>
+          movementPatterns.some((p) => p.test(c.query))
+        );
+        if (mainQuery) {
+          sqlQuery = mainQuery.query;
+        } else {
+          // Prefer candidate whose output has largest "Total rows: N" (main result usually has more rows)
+          let best: SqlCandidate | null = null;
+          let bestRows = 0;
+          for (const c of sqlCandidates) {
+            const out = outputStr(c);
+            const m = out.match(/Total rows:\s*(\d+)/i);
+            const rows = m ? parseInt(m[1], 10) : 0;
+            if (rows > bestRows) {
+              bestRows = rows;
+              best = c;
+            }
+          }
+          if (best) sqlQuery = best.query;
+        }
+      }
+      if (!sqlQuery) {
+        sqlQuery = sqlCandidates[sqlCandidates.length - 1].query;
       }
     }
 
     // Fallback: Extract from answer text
     if (!sqlQuery) {
       sqlQuery = this.extractSqlFromAnswer(answer);
-    }
-
-    // Extract CSV info from answer
-    if (answer.includes('CSV Download Link:')) {
-      const csvMatch = answer.match(/CSV ID: ([^\s]+)/);
-      if (csvMatch) {
-        csvId = csvMatch[1];
-        csvDownloadPath = `/download-csv/${csvId}`;
-      }
-    }
-    // Also extract from tool output so API returns csv_id even if LLM didn't repeat it (enables download link)
-    if (!csvId && queryResult && (queryResult.includes('CSV Download Link:') || queryResult.includes('CSV ID:'))) {
-      const csvMatch = queryResult.match(/CSV ID: ([^\s]+)/);
-      if (csvMatch) {
-        csvId = csvMatch[1];
-        csvDownloadPath = `/download-csv/${csvId}`;
-      }
     }
 
     return { sqlQuery, queryResult, csvId, csvDownloadPath };

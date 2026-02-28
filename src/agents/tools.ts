@@ -984,16 +984,61 @@ If the tool fails, it returns success: false with error and suggestions.`,
         polygonTolerance = Math.min(polygonTolerance, TOLERANCE_MAX);
         tolerancesUsed.push(polygonTolerance);
 
-        const simplifiedPoints = simplify(points, polygonTolerance, true);
-        const simplifiedCount = simplifiedPoints.length;
-        totalSimplifiedPoints += simplifiedCount;
-        allSimplifiedPolygons.push(simplifiedPoints);
+        let simplifiedPoints = simplify(points, polygonTolerance, true);
 
-        logger.info(`   📐 area_bounds polygon ${pi + 1}/${allPolygons.length}: effective_tolerance=${polygonTolerance.toFixed(4)} points ${originalCount}→${simplifiedCount}`);
+        // Ensure polygon ring is closed (first and last points match)
+        if (simplifiedPoints.length > 0) {
+          const first = simplifiedPoints[0];
+          const last = simplifiedPoints[simplifiedPoints.length - 1];
+          if (first.x !== last.x || first.y !== last.y) {
+            simplifiedPoints.push({ x: first.x, y: first.y });
+          }
+        }
+
+        // PostGIS requires at least 4 points for a valid polygon ring
+        if (simplifiedPoints.length < 4) {
+          // Revert to original points if simplification made it invalid
+          simplifiedPoints = [...points];
+
+          if (simplifiedPoints.length > 0) {
+            const first = simplifiedPoints[0];
+            const last = simplifiedPoints[simplifiedPoints.length - 1];
+            if (first.x !== last.x || first.y !== last.y) {
+              simplifiedPoints.push({ x: first.x, y: first.y });
+            }
+          }
+        }
+
+        // If even original has fewer than 4 points, we still push it but PostGIS may reject it.
+        // However, OpenStreetMap typically returns valid polygons (>=4 points).
+        // Only skip if there are literally 0 points.
+        if (simplifiedPoints.length >= 4) {
+          const simplifiedCount = simplifiedPoints.length;
+          totalSimplifiedPoints += simplifiedCount;
+          allSimplifiedPolygons.push(simplifiedPoints);
+        } else {
+          logger.warn(`   ⚠️  Polygon ${pi + 1} has ${simplifiedPoints.length} points even after fallback. Skipping invalid polygon.`);
+        }
+
+        logger.info(`   📐 area_bounds polygon ${pi + 1}/${allPolygons.length}: effective_tolerance=${polygonTolerance.toFixed(4)} points ${originalCount}→${simplifiedPoints.length}`);
       }
 
       logger.info(`   📊 Original polygons have ${totalOriginalPoints} total points`);
       logger.info(`   ✂️  Simplified to ${totalSimplifiedPoints} points (tolerances: ${tolerancesUsed.map(t => t.toFixed(4)).join(', ')})`);
+
+      if (allSimplifiedPolygons.length === 0) {
+        logger.error(`   ❌ Failed to generate valid polygons for location:`, cleanParams);
+        return JSON.stringify({
+          success: false,
+          location: cleanParams,
+          error: "Generated polygons are invalid (do not have enough points to form a closed area)",
+          suggestions: [
+            "Try a more specific location name",
+            "Generate the POLYGON manually using known coordinates",
+            "Inform the user that the area boundary could not be determined",
+          ],
+        }, null, 2);
+      }
 
       // Build PostgreSQL WKT format
       let postgresPolygon: string;

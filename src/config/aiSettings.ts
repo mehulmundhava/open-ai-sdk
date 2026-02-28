@@ -17,6 +17,7 @@ export async function getAiModelName(): Promise<string> {
 
     const value = rows?.[0]?.value?.trim();
     if (value) {
+      logger.info(`Using model: ${value}`);
       return value;
     }
   } catch (error) {
