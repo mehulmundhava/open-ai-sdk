@@ -88,7 +88,7 @@ export const TABLE_METADATA: TableMetadata[] = [
     importantFields: [
       'id (PRIMARY KEY)',
       'user_id (integer, links to admin.id)',
-      'device (string, links to device_details_table.device_id and other-table.device_id)',
+      'device_id (string, links to device_details_table.device_id and other-table.device_id)',
     ],
   },  
   {

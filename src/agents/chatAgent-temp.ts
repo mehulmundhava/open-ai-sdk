@@ -8,6 +8,8 @@ import {
   executeDbQueryTool,
   countQueryTool,
   listQueryTool,
+  getTableListTool,
+  getTablesImportantFieldsTool,
   getTableStructureTool,
   FacilityJourneyListTool,
   FacilityJourneyCountTool,
@@ -19,35 +21,6 @@ import { TokenTracker } from '../utils/tokenTracker';
 import { AgentResponseProcessor } from '../utils/agentResponseProcessor';
 import { AiChat } from '../models/AiChat';
 import { AiChatMessage } from '../models/AiChatMessage';
-import { sequelizeReadOnly } from '../config/database';
-import { getAiModelName } from '../config/aiSettings';
-import { QueryTypes } from 'sequelize';
-
-interface UserRoleInfo {
-  roleId: number;
-  companyId: number | null;
-  adminUserId: number | null;
-}
-
-async function getUserRoleInfo(userId: string): Promise<UserRoleInfo | null> {
-  try {
-    const rows = await sequelizeReadOnly.query(
-      `SELECT role_id, company_id, id FROM admin WHERE id = :userId LIMIT 1`,
-      { type: QueryTypes.SELECT, replacements: { userId } },
-    ) as any[];
-
-    if (rows.length === 0) return null;
-
-    return {
-      roleId: rows[0].role_id,
-      companyId: rows[0].company_id ?? null,
-      adminUserId: rows[0].user_id ?? null,
-    };
-  } catch (error) {
-    logger.warn(`Failed to fetch role info for userId ${userId}: ${error}`);
-    return null;
-  }
-}
 
 export interface ChatAgentConfig {
   userId?: string;
@@ -60,7 +33,7 @@ export interface ChatAgentConfig {
  * This content is static and will be cached by OpenAI
  */
 function buildStaticPromptPrefix(isJourney: boolean = false): string {
-  const toolsList = 'check_user_query_restriction, count_query, list_query, execute_db_query, get_table_structure, get_area_bounds, facility_journey_list_tool, facility_journey_count_tool, custom_script_tool';
+  const toolsList = 'count_query, list_query, execute_db_query, get_table_list, get_tables_important_fields, get_table_structure, get_area_bounds, facility_journey_list_tool, facility_journey_count_tool, custom_script_tool';
 
   const staticPrompt = `
     PostgreSQL SQL Agent - Knowledge Base and Instructions
@@ -71,13 +44,12 @@ function buildStaticPromptPrefix(isJourney: boolean = false): string {
     AVAILABLE TOOLS: ${toolsList}
 
     TOOL SELECTION WORKFLOW:
-    1. Check user query restriction → check_user_query_restriction
-    2. COUNT queries ("how many", "count of") → count_query
-    3. LIST queries ("list", "show", "get all") → list_query
-    4. Other SQL queries → execute_db_query
-    5. FACILITY Journey questions ("facility journey", "facility to facility") → facility_journey_list_tool or facility_journey_count_tool
-    6. Complex multi-table logic (cross-referencing rows between tables) → custom_script_tool
-    7. Full column schema from DB (when needed) → get_table_structure
+    1. COUNT queries ("how many", "count of") → count_query
+    2. LIST queries ("list", "show", "get all") → list_query
+    3. Other SQL queries → execute_db_query
+    4. FACILITY Journey questions ("facility journey", "facility to facility") → facility_journey_list_tool or facility_journey_count_tool
+    5. Complex multi-table logic (cross-referencing rows between tables) → custom_script_tool
+    6. Table discovery → get_table_list → get_tables_important_fields → get_table_structure
 
     CRITICAL RULES:
     1. ALWAYS execute queries using tools. NEVER just describe a query.
@@ -94,117 +66,23 @@ function buildStaticPromptPrefix(isJourney: boolean = false): string {
     - This is especially important for journey questions — if unclear whether the user means regular journey or facility journey, ASK before proceeding.
 
     ================================================================
-    DATABASE TABLES & SCHEMA REFERENCE
+    DATABASE TABLES
     ================================================================
 
-    PK=Primary Key, UK=Unique Key, FK=Foreign Key
-
-    1. device_details_table (D) — Device information metadata, identifiers
-       PK: sno | UK: device_id
-       Fields: device_id, device_name, imei, grai_id, iccid, imsi
-
-    2. user_device_assignment (UD) — User→device access mapping. ALWAYS join for user filtering.
-       PK: id
-       Fields: user_id (FK→admin.id), device_id (FK→*.device_id)
-
-    3. device_current_data (CD) — Current/latest device snapshot (location, sensors, alerts)
-       PK: id | UK: device_id
-       Fields: device_id, device_name, grai_id, imei,
-       latitude, longitude, h3_id, location_type,
-       facility_id (FK→facilities), facility_type (M/R/U/D),
-       event_time (last location), updated_at (last reported),
-       temperature (°C), battery (%),
-       travel_distance (meters), dwell_time_seconds (sec), dwell_time (human: "1D"/"2H"/"10M"),
-       shock_id (FK→shock_info.id), shock_event_time (use for "devices w/ shock after [date]" — avoid joining shock_info),
-       free_fall_id (FK→shock_info.id), free_fall_event_time (same for free-fall)
-
-    4. incoming_message_history_k (IK) — Historical device location/sensor log
-       PK: sno
-       Fields: device_id, event_time, timestamp (reported time),
-       latitude, longitude, temperature (°C), battery (%),
-       facility_id (FK→facilities), facility_type,
-       dwell_time (human), dwell_timestamp (sec),
-       travel_distance (meters), accuracy (meters), altitude (meters), address (JSON)
-
-    5. device_geofencings (DG) — Facility entry/exit records. ⚠️ NO latitude/longitude columns.
-       PK: id
-       Fields: device_id, facility_id (FK→facilities), facility_type,
-       entry_event_time, exit_event_time, facility_last_event_time
-
-    6. facilities (F) — Facility/warehouse info with coordinates
-       PK: id | UK: facility_id
-       Fields: facility_id, facility_name, facility_type (M/R/U/D),
-       latitude, longitude, street, city, state, zip_code,
-       company_id (FK→admin.company_id for role_id=2), is_active (0=inactive, 1=active)
-
-    7. sensor (S) — Temperature/battery sensor readings history
-       PK: id | UK: imt_id (FK→incoming_message_history_k.sno)
-       Fields: device_id, temperature (°C), battery (%), event_time
-
-    8. shock_info — Full shock/free-fall event history (large table — avoid for simple "list devices w/ shock")
-       PK: id
-       Fields: device_id, type ('shock'|'free_fall'), time_stamp (event time),
-       latitude, longitude, location_event_time,
-       imt_k_id (FK→incoming_message_history_k.sno)
-
-    9. device_temperature_alert — Temperature alert history with location
-       PK: id
-       Fields: device_id, start_time, end_time,
-       type (0=min temp, 1=max temp), threshold_value (°C trigger), threshold_duration (sec min duration to trigger),
-       status (0=inactive, 1=active — becomes 1 when temp outside threshold > threshold_duration),
-       latitude, longitude, location_event_time,
-       imt_k_id (FK→incoming_message_history_k.sno)
-
-    10. device_alerts — Last alert per device (simplified view)
-        PK: id | UK: device_id
-        Fields: device_id,
-        min_temperature, min_temperature_event_time, min_temperature_sensor_id (FK→sensor.id),
-        max_temperature, max_temperature_event_time, max_temperature_sensor_id (FK→sensor.id),
-        battery, battery_event_time, battery_sensor_id (FK→sensor.id),
-        light, light_event_time, light_id (FK→light_data.id)
-
-    11. device_settings_data — Current device thresholds
-        PK: id | UK: device_id
-        Fields: device_id,
-        ltth (low temp threshold °C), htth (high temp threshold °C),
-        ltdth (low temp duration sec), htdth (high temp duration sec),
-        lbth (low battery %), hdth (high dwell-time sec)
-
-    12. device_settings_history — Threshold change history
-        PK: id
-        Fields: device_id, name (ltth/htth/ltdth/htdth/lbth/hdth),
-        value, value_type (real/integer), start_time, end_time
-
-    13. area_bounds (AB) — Geographic boundaries (populated by get_area_bounds tool)
-        PK: id
-        Fields: area_name, boundary (geometry — use with ST_Contains), location_params (jsonb)
-
-    14. admin — User accounts
-        PK: id | UK: user_id
-        Fields: user_id, role_id (1=super-admin, 2=user, 3=sub-user), company_id
-
-    15. facility_sub_users — Facility↔sub-user mapping (for role_id=3 sub-users)
-        PK: id
-        Fields: user_id (FK→admin.user_id), facility_id (FK→facilities.facility_id)
-
-    16. light_data — Light sensor readings
-        PK: id
-        Fields: device_id, event_time, light (lux),
-        imt_id (FK→incoming_message_history_k.sno)
-
-
-    ================================================================
-    FACILITY ACCESS BY ROLE
-    ================================================================
-
-    The user's role_id (provided in the dynamic FACILITY ACCESS section below) determines which facilities are visible.
-    Apply this filter whenever the facilities table appears in ANY query (direct queries, JOINs, subqueries, facility journeys).
-
-    - role_id=1 (super-admin): No facility filtering.
-    - role_id=2 (company user): Filter by f.company_id = <company_id> (value provided in FACILITY ACCESS section).
-    - role_id=3 (sub-user): JOIN facility_sub_users fsu ON fsu.facility_id = f.facility_id AND fsu.user_id = <admin_user_id> (value provided in FACILITY ACCESS section).
-
-    ⚠️ This filter is IN ADDITION TO user_device_assignment filtering on devices.
+    Tables and key fields:
+    - device_details_table (D): device_id, device_name, grai_id, imei, iccid, imsi
+    - user_device_assignment (UD): user_id, device (foreign key to other tables' device_id). ALWAYS join for user filtering.
+    - device_current_data (CD): Current/latest device snapshot. Fields: device_id, temperature, battery, longitude, latitude, dwell_time_seconds, facility_id, facility_type, event_time, shock_event_time (last shock event time), free_fall_event_time (last free fall event time), updated_at (last reported time).
+    - incoming_message_history_k (IK): Historical device location/sensor log. Fields: device_id, event_time, latitude, longitude, temperature, battery, facility_id, facility_type, dwell_timestamp (seconds), accuracy.
+    - device_geofencings (DG): Facility entry/exit records. Fields: device_id, facility_id, facility_type, entry_event_time, exit_event_time. ⚠️ NO latitude/longitude columns.
+    - facilities (F): Facility info. Fields: facility_id, facility_name, facility_type, latitude, longitude, street, city, state, zip_code, company_id.
+    - sensor (S): Sensor data history. Fields: device_id, temperature, battery, event_time.
+    - shock_info: Shock/free-fall events. Fields: device_id, latitude, longitude, time_stamp (event time), type ('shock' or 'free_fall').
+    - device_temperature_alert: Temperature alert history. Fields: device_id, latitude, longitude, start_time, end_time, type (0=min, 1=max), threshold_value (temperature value in Celsius to trigger alert), threshold_duration (seconds, min duration of continuous temperature outside threshold to trigger alert), status (0=inactive, 1=active | become 0->1 when temperature goes outside threshold more then threshold_duration).
+    - device_alerts: Last alert per device. Fields: device_id, min_temperature, min_temperature_event_time, max_temperature, max_temperature_event_time, battery, battery_event_time.
+    - device_settings_data: Current thresholds per device. Fields: device_id, ltth (low themeprature threshold in Celsius), htth (high themeprature threshold in Celsius), ltdth (low themeprature duration threshold in seconds), htdth (high themeprature duration threshold in seconds), lbth (low battery threshold in percentage), hdth (high dwell-time threshold in seconds).
+    - device_settings_history: Threshold change history. Fields: device_id, name, value, start_time, end_time, value_type.
+    - area_bounds (ab): Geographic boundaries for locations. Fields: id (PK), area_name, boundary (geometry). Populated by get_area_bounds tool.
 
     ================================================================
     LATITUDE / LONGITUDE REFERENCE GUIDE
@@ -242,7 +120,7 @@ function buildStaticPromptPrefix(isJourney: boolean = false): string {
        - Use SQL tools: count_query, list_query, execute_db_query
        - Example: "devices that traveled in USA last week" →
          SELECT DISTINCT ik.device_id FROM incoming_message_history_k ik
-         JOIN user_device_assignment ud ON ud.device_id = ik.device_id
+         JOIN user_device_assignment ud ON ud.device = ik.device_id
          JOIN area_bounds ab ON ab.id = <area_bound_id>
          WHERE ud.user_id = '<user_id>'
          AND ik.event_time >= NOW() - INTERVAL '7 days'
@@ -258,7 +136,7 @@ function buildStaticPromptPrefix(isJourney: boolean = false): string {
        - SQL template for these tools:
          SELECT dg.device_id, dg.facility_id, dg.facility_type, f.facility_name, dg.entry_event_time, dg.exit_event_time
          FROM device_geofencings dg
-         JOIN user_device_assignment uda ON uda.device_id = dg.device_id
+         JOIN user_device_assignment uda ON uda.device = dg.device_id
          LEFT JOIN facilities f ON dg.facility_id = f.facility_id
          WHERE uda.user_id = '<user_id>' [filters]
          ORDER BY dg.entry_event_time ASC
@@ -306,36 +184,12 @@ function buildStaticPromptPrefix(isJourney: boolean = false): string {
     ================================================================
 
     - Always filter by user_id via user_device_assignment unless admin
-    - JOIN: user_device_assignment ud ON ud.device_id = other_table.device_id
+    - user_device_assignment.device = other_table.device_id (field is "device", NOT "device_id")
     - SELECT only needed columns, never SELECT *
     - Temperature in Celsius (°C), dwell time in seconds (86400 = 1 day)
     - Facility types: M (manufacturer), R (retailer), U, D, etc.
-    - Use the schema reference above to construct queries — adapt JOINs, filters, and aggregations to match the user's intent
+    - Follow example queries from vector store, adapt time ranges/filters as needed
     - Only refuse if query accesses other users' data
-
-    ================================================================
-    SQL QUALITY GATE — INTERNAL REVIEW BEFORE EXECUTION
-    ================================================================
-
-    Before executing ANY SQL, internally reason through three expert perspectives in one pass:
-
-    1. LOGIC ARCHITECT — Does the SQL actually answer the user's intent?
-       - Correct table for current vs historical data?
-       - Right JOINs, WHERE filters, and aggregations for the specific question?
-       - Counting distinct entities when asked "how many"?
-
-    2. SCHEMA DBA — Does every identifier match the schema above exactly?
-       - All table names, column names, and data types verified against schema?
-       - FK relationships joined correctly (e.g., ud.device_id = cd.device_id)?
-       - No invented columns or wrong aliases?
-
-    3. PERFORMANCE ENGINEER — Will this query run safely?
-       - No SELECT *, no Cartesian products, no missing user_id filter?
-       - Large tables (shock_info, incoming_message_history_k) filtered by time range or device_id?
-       - Avoid joining shock_info for simple "list devices with shock" — use device_current_data.shock_event_time instead?
-
-    DECISION: If any check fails → fix the query before executing. Never execute a query that fails any check.
-    If all checks pass → execute immediately with the appropriate tool.
 
     ================================================================
     CUSTOM SCRIPT TOOL (custom_script_tool)
@@ -354,66 +208,96 @@ function buildStaticPromptPrefix(isJourney: boolean = false): string {
 }
 
 /**
- * Build dynamic prompt sections (user-specific context)
+ * Build dynamic prompt sections (RAG content and user-specific)
  */
-function buildDynamicPromptSections(userId: string, roleInfo: UserRoleInfo | null): string {
+async function buildDynamicPromptSections(
+  userId: string,
+  question: string | undefined,
+  vectorStore: VectorStoreService,
+  isJourney: boolean
+): Promise<string> {
+  let dynamicContent = '';
+
+  // Add user/admin specific instructions (semi-static but user-specific)
   const isAdmin = userId && userId.toLowerCase() === 'admin';
-
   if (isAdmin) {
-    return `
+    dynamicContent += `
 
-ADMIN MODE: The user_id for this request is: ${userId}. No user_id filtering required; query across all users. No facility filtering required. Do NOT ask the user for their user ID.
+ADMIN MODE: The user_id for this request is: ${userId}. No user_id filtering required; query across all users. Do NOT ask the user for their user ID.
 `;
-  }
-
-  let prompt = `
+  } else {
+    dynamicContent += `
 
 USER MODE: The user_id for this request is: ${userId}. Do NOT ask the user for their user ID.
 - ALWAYS filter by ud.user_id = '${userId}'
-- ALWAYS join user_device_assignment (ud) ON ud.device_id = other_table.device_id
+- ALWAYS join user_device_assignment (ud)
+- CRITICAL JOIN INSTRUCTION: user_device_assignment table has a field called "device" (NOT "device_id")
+  - Other tables (device_current_data, device_geofencings,incoming_message_history_k,sensor,shock_info,device_temperature_alert etc.) have "device_id" field
+  - CORRECT join: JOIN user_device_assignment ud ON ud.device = other_table.device_id
+  - WRONG join: JOIN user_device_assignment ud ON ud.device_id = other_table.device_id (DO NOT use this)
+  - Example: JOIN user_device_assignment ud ON ud.device = cd.device_id (for device_current_data)
 - Aggregations, GROUP BY, COUNT, SUM, etc. are ALLOWED for this user_id's data
-- Time ranges (days, months, years) are ALLOWED — adapt INTERVAL values as needed
+- Time ranges (days, months, years) are ALLOWED - adapt examples by changing INTERVAL values
 - Multiple visits, repeated facilities, patterns are ALLOWED for this user_id
 - ONLY refuse if query would access OTHER users' data (user_id != ${userId})
+- Follow the example queries provided - adapt them to match the question's time range
 - Never explain SQL/schema in answers
 `;
+  }
 
-  if (roleInfo) {
-    prompt += `
-FACILITY ACCESS (role_id=${roleInfo.roleId}):
-`;
-    if (roleInfo.roleId === 1) {
-      prompt += `- Super-admin: full access to all facilities. No facility filtering needed.\n`;
-    } else if (roleInfo.roleId === 2 && roleInfo.companyId != null) {
-      prompt += `- Company user: MUST filter facilities by company_id = ${roleInfo.companyId}
-- Whenever the facilities table (f) appears in a query, add: f.company_id = ${roleInfo.companyId}
-- For device_geofencings joins: LEFT JOIN facilities f ON f.facility_id = dg.facility_id AND f.company_id = ${roleInfo.companyId}
-- For direct facility queries: WHERE f.company_id = ${roleInfo.companyId}
-`;
-    } else if (roleInfo.roleId === 3 && roleInfo.adminUserId != null) {
-      prompt += `- Sub-user: MUST filter facilities via facility_sub_users table with user_id = ${roleInfo.adminUserId}
-- Whenever the facilities table (f) appears in a query, add:
-  JOIN facility_sub_users fsu ON fsu.facility_id = f.facility_id AND fsu.user_id = ${roleInfo.adminUserId}
-- For direct facility queries: JOIN facility_sub_users fsu ON fsu.facility_id = f.facility_id WHERE fsu.user_id = ${roleInfo.adminUserId}
-`;
+  // Add RAG content (examples and business rules from vector store)
+  if (question) {
+    try {
+      const exampleDocs = await vectorStore.searchExamples(question, 5);
+      const extraPrompts = await vectorStore.searchExtraPrompts(question, 1);
+
+      if (exampleDocs.length > 0) {
+        dynamicContent += '\n\nEXAMPLES FROM VECTOR STORE:\n';
+        exampleDocs.forEach((doc, idx) => {
+          dynamicContent += `\nExample ${idx + 1}:\n`;
+          dynamicContent += `Question: ${doc.question || doc.content}\n`;
+          if (doc.sql_query) {
+            dynamicContent += `SQL: ${doc.sql_query}\n`;
+          }
+          if (doc.description) {
+            dynamicContent += `Description: ${doc.description}\n`;
+          }
+        });
+      }
+
+      if (extraPrompts.length > 0) {
+        dynamicContent += '\n\nBUSINESS RULES:\n';
+        extraPrompts.forEach((prompt, idx) => {
+          dynamicContent += `\n${idx + 1}. ${prompt.content}\n`;
+        });
+      }
+    } catch (error) {
+      logger.warn(`Failed to load examples from vector store: ${error}`);
     }
   }
 
-  return prompt;
+  return dynamicContent;
 }
 
 /**
- * Build complete system prompt with static + dynamic sections
+ * Build complete system prompt (for backward compatibility)
  */
-function buildSystemPrompt(
+async function buildSystemPrompt(
   userId: string,
+  topK: number,
+  question: string | undefined,
+  vectorStore: VectorStoreService,
   isJourney: boolean = false,
-  roleInfo: UserRoleInfo | null = null,
-): { staticPrefix: string; dynamicSections: string } {
-  const staticPrefix = buildStaticPromptPrefix(isJourney);
-  const dynamicSections = buildDynamicPromptSections(userId, roleInfo);
+  includeStaticContent: boolean = true
+): Promise<{ staticPrefix: string; dynamicSections: string }> {
+  // Only include static content on first message
+  const staticPrefix = includeStaticContent ? buildStaticPromptPrefix(isJourney) : '';
+  const dynamicSections = await buildDynamicPromptSections(userId, question, vectorStore, isJourney);
 
-  return { staticPrefix, dynamicSections };
+  return {
+    staticPrefix,
+    dynamicSections,
+  };
 }
 
 /**
@@ -440,11 +324,17 @@ function detectJourneyQuestion(question: string): boolean {
 export async function createChatAgent(config: ChatAgentConfig): Promise<Agent> {
   const { userId = 'admin', topK = 20, vectorStore } = config;
 
+  // Set default OpenAI API key
   setDefaultOpenAIKey(settings.openaiApiKey);
 
-  const client = new OpenAI({ apiKey: settings.openaiApiKey });
-  const modelName = await getAiModelName();
-  const model = new OpenAIChatCompletionsModel(client as any, modelName);
+  // Create OpenAI client (using same version as @openai/agents-openai)
+  const client = new OpenAI({
+    apiKey: settings.openaiApiKey,
+  });
+
+  // Create model with the client (cast to any to handle version compatibility)
+  // Note: prompt_cache_key will be set per request in runChatAgent
+  const model = new OpenAIChatCompletionsModel(client as any, 'gpt-4o');
 
   // Create agent with tools (instructions will be set per request for caching)
   const agent = new Agent({
@@ -456,6 +346,8 @@ export async function createChatAgent(config: ChatAgentConfig): Promise<Agent> {
       executeDbQueryTool,
       countQueryTool,
       listQueryTool,
+      getTableListTool,
+      getTablesImportantFieldsTool,
       getTableStructureTool,
       FacilityJourneyListTool,
       FacilityJourneyCountTool,
@@ -499,33 +391,47 @@ export async function runChatAgent(
   history?: any;
 }> {
   try {
+    // Detect journey question
     const isJourney = detectJourneyQuestion(question);
-    const roleInfo = userId.toLowerCase() !== 'admin' ? await getUserRoleInfo(userId) : null;
 
-    const { staticPrefix, dynamicSections } = buildSystemPrompt(userId, isJourney, roleInfo);
+    // Build prompt with separated static and dynamic sections
+    // Only include static content on first message
+    const { staticPrefix, dynamicSections } = await buildSystemPrompt(
+      userId,
+      20,
+      question,
+      vectorStore,
+      isJourney,
+    );
+
+    // Construct final system prompt: Static (cached) + Dynamic (RAG) + User question
+    // The static prefix will be cached, dynamic sections change per request
+    // On subsequent messages, staticPrefix will be empty
+
+    // const finalSystemPrompt = isFirstMessage 
+    //   ? staticPrefix + dynamicSections 
+    //   : dynamicSections;
 
     const finalSystemPrompt = staticPrefix + dynamicSections;
 
-    const modelName = await getAiModelName();
-    const client = new OpenAI({ apiKey: settings.openaiApiKey });
-    const model = new OpenAIChatCompletionsModel(client as any, modelName);
-
+    // Determine prompt cache key based on question type
     const promptCacheKey = isJourney ? 'sql_assistant_journey_v1' : 'sql_assistant_v1';
 
+    // Create new agent with final instructions
     const updatedAgent = new Agent({
       name: agent.name || 'SQL Assistant',
       instructions: finalSystemPrompt,
-      model,
+      model: agent.model,
       tools: agent.tools || [],
     });
 
+    // Log conversation start with cache key
     logger.info('💬 CONVERSATION START', {
       userId,
       chatId,
       question,
       isJourney,
       promptCacheKey,
-      model: modelName,
       timestamp: new Date().toISOString(),
     });
 
