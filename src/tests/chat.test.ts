@@ -104,7 +104,6 @@ export async function testChatEndpoint(): Promise<boolean> {
     }
     if (response.debug) {
       logger.info(`   Request ID: ${response.debug.request_id}`);
-      logger.info(`   Token Usage: ${JSON.stringify(response.debug.token_usage)}`);
     }
 
     return true;

@@ -668,36 +668,49 @@ This tool: 1) Executes SQL for raw geofencing rows 2) Runs facility journey coun
  * Get area bounds tool - fetches geographic polygon for a location from OpenStreetMap,
  * stores it in area_bounds table, and returns area_bound_id for use in SQL via JOIN.
  */
+/** Values that mean "not provided" from LLM (e.g. "/" or empty); do not send to Nominatim. */
+function isBlankParam(v: string | number | null | undefined): boolean {
+  if (v == null) return true;
+  const s = String(v).trim();
+  return s === '' || s === '/';
+}
+
+/** US state names (lowercase) for which we infer country="United States" when country is missing or invalid. */
+const US_STATE_NAMES = new Set([
+  'alabama', 'alaska', 'arizona', 'arkansas', 'california', 'colorado', 'connecticut',
+  'delaware', 'florida', 'georgia', 'hawaii', 'idaho', 'illinois', 'indiana', 'iowa',
+  'kansas', 'kentucky', 'louisiana', 'maine', 'maryland', 'massachusetts', 'michigan',
+  'minnesota', 'mississippi', 'missouri', 'montana', 'nebraska', 'nevada', 'new hampshire',
+  'new jersey', 'new mexico', 'new york', 'north carolina', 'north dakota', 'ohio',
+  'oklahoma', 'oregon', 'pennsylvania', 'rhode island', 'south carolina', 'south dakota',
+  'tennessee', 'texas', 'utah', 'vermont', 'virginia', 'washington', 'west virginia',
+  'wisconsin', 'wyoming', 'district of columbia', 'washington dc',
+]);
+
 export const getAreaBoundsTool = tool({
   name: 'get_area_bounds',
-  description: `Get the geographic boundary for a location from OpenStreetMap and get an ID to use in SQL.
+  description: `Get the geographic BOUNDARY (polygon) for a location from OpenStreetMap. Returns an area_bound_id for use in SQL.
 
-Use this tool when the user asks about a specific location (city, state, country, region) and you need
-geographic filtering in SQL queries.
+CRITICAL — Parameters must request a REGION boundary (country/state/city), not a street address. The API returns Polygon/MultiPolygon for regions and Point for addresses; only Polygon/MultiPolygon work. Passing wrong parameters (e.g. country="/" or missing country for a state) can return a Point and the tool will FAIL.
 
-IMPORTANT: Pass structured location parameters for accurate results:
-- For countries: use { country: "United States" } or { country: "Mexico" }
-- For states: use { state: "California" } or { state: "Texas" }
-- For cities: use { city: "New York" } or { city: "Los Angeles" }
-- For general queries: use { q: "location name" } as fallback
-- You can combine parameters: { country: "United States", state: "California" }
+Parameter rules — follow exactly for reliable polygon generation:
+1. For COUNTRIES: pass only country with full name. Example: { country: "United States" } or { country: "Mexico" }. Do NOT use "/" or empty string.
+2. For US STATES (California, Texas, New York, etc.): ALWAYS pass BOTH country and state: { country: "United States", state: "California" }. Never pass state alone or country: "/" when querying a state — that can return a Point and fail.
+3. For CITIES: pass country + city or state + city when ambiguous. Example: { country: "United States", city: "Los Angeles" } or { state: "New York", city: "New York" }.
+4. Do NOT pass "/" or empty string for any parameter. Omit the parameter instead.
+5. Optional: countrycodes (e.g. "us") can be used WITH country for countries; for states always use country name + state.
 
-Examples:
-- "devices in United States" -> { country: "United States" }
-- "shipments in California" -> { state: "California" }
-- "facilities in New York" -> { city: "New York" } or { state: "New York" }
-- "journeys in Mexico" -> { country: "Mexico" }
+Correct examples:
+- "in United States" -> { country: "United States" }
+- "in California" or "in californiya" -> { country: "United States", state: "California" }
+- "in Texas" -> { country: "United States", state: "Texas" }
+- "in Mexico" -> { country: "Mexico" }
+- "in New York" (state) -> { country: "United States", state: "New York" }
+- "in New York City" -> { country: "United States", city: "New York" } or { state: "New York", city: "New York" }
 
-The tool returns:
-- success: boolean
-- area_bound_id: the primary key id to use in your SQL (use this, not polygon text)
-- area_name: human-readable location name
+Wrong (will often fail): { country: "/", state: "California" } or { state: "California" } without country — may return a Point.
 
-For geographic filtering in SQL you MUST:
-1. JOIN the area_bounds table (e.g. alias 'ab') and filter by the returned id: JOIN area_bounds ab ON ab.id = <area_bound_id>
-2. Use ST_Contains(ab.boundary, ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)) in WHERE - do NOT paste polygon or MULTIPOLYGON text into the query.
-
-If the tool fails, it returns success: false with error and suggestions.`,
+Returns: success, area_bound_id (use in SQL JOIN), area_name. In SQL: JOIN area_bounds ab ON ab.id = <area_bound_id> AND ST_Contains(ab.boundary, ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)). Do NOT paste polygon text into queries.`,
   parameters: z.object({
     country: z.string().nullable().optional().describe('Country name (e.g., "United States", "Mexico", "India")'),
     state: z.string().nullable().optional().describe('State/Province name (e.g., "California", "Texas", "New York")'),
@@ -724,53 +737,54 @@ If the tool fails, it returns success: false with error and suggestions.`,
   }) => {
     logger.info(`🔧 TOOL CALLED: get_area_bounds`);
 
-    // Filter out null values and create clean params object
+    // Normalize: treat "/" and empty string as not provided. Infer country for US states when missing.
+    const norm = (v: string | number | null | undefined): string | number | null =>
+      (v != null && !isBlankParam(v) ? (typeof v === 'string' ? v.trim() : v) : null) as string | number | null;
+    let country = norm(params.country) as string | null;
+    let state = norm(params.state) as string | null;
+    const city = norm(params.city) as string | null;
+    const county = norm(params.county) as string | null;
+    const street = norm(params.street) as string | null;
+    const postalcode = norm(params.postalcode) as string | null;
+    const q = norm(params.q) as string | null;
+    let countrycodes = norm(params.countrycodes) as string | null;
+
+    // When state is set and country is missing/invalid, infer United States for known US state names (avoids Point result)
+    if (state && !country && US_STATE_NAMES.has(state.toString().toLowerCase())) {
+      country = 'United States';
+      countrycodes = 'us';
+      logger.info(`   📌 Inferred country "United States" for state "${state}" to request region boundary (Polygon/MultiPolygon)`);
+    }
+
     const cleanParams: Record<string, string | number> = {};
-    if (params.country != null) cleanParams.country = params.country;
-    if (params.state != null) cleanParams.state = params.state;
-    if (params.city != null) cleanParams.city = params.city;
-    if (params.county != null) cleanParams.county = params.county;
-    if (params.street != null) cleanParams.street = params.street;
-    if (params.postalcode != null) cleanParams.postalcode = params.postalcode;
-    if (params.q != null) cleanParams.q = params.q;
-    if (params.countrycodes != null) cleanParams.countrycodes = params.countrycodes;
+    if (country != null) cleanParams.country = country;
+    if (state != null) cleanParams.state = state;
+    if (city != null) cleanParams.city = city;
+    if (county != null) cleanParams.county = county;
+    if (street != null) cleanParams.street = street;
+    if (postalcode != null) cleanParams.postalcode = postalcode;
+    if (q != null) cleanParams.q = q;
+    if (countrycodes != null) cleanParams.countrycodes = countrycodes;
     if (params.polygon_threshold != null) cleanParams.polygon_threshold = params.polygon_threshold;
     if (params.limit != null) cleanParams.limit = params.limit;
 
     logger.info(`   Parameters:`, cleanParams);
 
     try {
-      // Build OpenStreetMap Nominatim API URL with proper parameters
+      // Build OpenStreetMap Nominatim API URL (only non-blank params so we get region boundary, not Point)
       const apiParams = new URLSearchParams();
 
-      // Add structured parameters (prioritize specific over general)
-      if (params.country) {
-        apiParams.append('country', params.country);
-      }
-      if (params.state) {
-        apiParams.append('state', params.state);
-      }
-      if (params.city) {
-        apiParams.append('city', params.city);
-      }
-      if (params.county) {
-        apiParams.append('county', params.county);
-      }
-      if (params.street) {
-        apiParams.append('street', params.street);
-      }
-      if (params.postalcode) {
-        apiParams.append('postalcode', params.postalcode);
-      }
-      if (params.countrycodes) {
-        apiParams.append('countrycodes', params.countrycodes);
-      }
+      if (country) apiParams.append('country', country);
+      if (state) apiParams.append('state', state);
+      if (city) apiParams.append('city', city);
+      if (county) apiParams.append('county', county);
+      if (street) apiParams.append('street', street);
+      if (postalcode) apiParams.append('postalcode', postalcode);
+      if (countrycodes) apiParams.append('countrycodes', countrycodes);
 
-      // Use 'q' parameter only if no specific parameters provided
-      if (!params.country && !params.state && !params.city && !params.county && !params.street && params.q) {
-        apiParams.append('q', params.q);
-      } else if (params.q && (params.country || params.state || params.city)) {
-        // If both specific params and q are provided, q is ignored (specific params take precedence)
+      if (!country && !state && !city && !county && !street && q) {
+        apiParams.append('q', q);
+      } else if (q && (country || state || city)) {
         logger.info(`   ⚠️  Both specific parameters and 'q' provided, using specific parameters only`);
       }
 
@@ -812,7 +826,7 @@ If the tool fails, it returns success: false with error and suggestions.`,
       logger.info(`   📥 API Response received: ${Array.isArray(data) ? data.length : 'not array'} results`);
 
       if (!Array.isArray(data) || data.length === 0) {
-        const locationDesc = params.country || params.state || params.city || params.q || 'unknown location';
+        const locationDesc = country || state || city || q || 'unknown location';
         logger.warn(`   ⚠️  No results found for location:`, params);
         logger.warn(`   Response data: ${JSON.stringify(data).substring(0, 200)}`);
         return JSON.stringify({
@@ -857,6 +871,22 @@ If the tool fails, it returns success: false with error and suggestions.`,
       }
 
       logger.info(`   🗺️  GeoJSON type: ${geojson.type}`);
+
+      // Tool requires Polygon or MultiPolygon (region boundary). Point = address, not a region — suggest parameter fix.
+      if (geojson.type === 'Point') {
+        logger.error(`   ❌ API returned a Point (address), not a region boundary. Location:`, cleanParams);
+        const suggestions = [
+          'For US states (e.g. California, Texas): pass both country and state: { country: "United States", state: "California" }.',
+          'For countries: pass { country: "United States" } or { country: "Mexico" } with full name, never "/" or empty.',
+          'Inform the user that the area boundary could not be determined for this location.',
+        ];
+        return JSON.stringify({
+          success: false,
+          location: cleanParams,
+          error: "API returned a Point (single address) instead of a region boundary (Polygon/MultiPolygon). Pass country+state for US states, or country for countries.",
+          suggestions,
+        }, null, 2);
+      }
 
       // Variables to store processed polygons
       let allPolygons: number[][][] = [];

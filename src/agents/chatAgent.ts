@@ -4,7 +4,7 @@ import OpenAI from 'openai';
 import { settings } from '../config/settings';
 import { VectorStoreService } from '../services/vectorStore';
 import {
-  checkUserQueryRestrictionTool,
+  // checkUserQueryRestrictionTool,
   executeDbQueryTool,
   countQueryTool,
   listQueryTool,
@@ -60,7 +60,7 @@ export interface ChatAgentConfig {
  * This content is static and will be cached by OpenAI
  */
 function buildStaticPromptPrefix(isJourney: boolean = false): string {
-  const toolsList = 'check_user_query_restriction, count_query, list_query, execute_db_query, get_table_structure, get_area_bounds, facility_journey_list_tool, facility_journey_count_tool, custom_script_tool';
+  const toolsList = ' count_query, list_query, execute_db_query, get_table_structure, get_area_bounds, facility_journey_list_tool, facility_journey_count_tool, custom_script_tool';
 
   const staticPrompt = `
     PostgreSQL SQL Agent - Knowledge Base and Instructions
@@ -71,13 +71,12 @@ function buildStaticPromptPrefix(isJourney: boolean = false): string {
     AVAILABLE TOOLS: ${toolsList}
 
     TOOL SELECTION WORKFLOW:
-    1. Check user query restriction → check_user_query_restriction
-    2. COUNT queries ("how many", "count of") → count_query
-    3. LIST queries ("list", "show", "get all") → list_query
-    4. Other SQL queries → execute_db_query
-    5. FACILITY Journey questions ("facility journey", "facility to facility") → facility_journey_list_tool or facility_journey_count_tool
-    6. Complex multi-table logic (cross-referencing rows between tables) → custom_script_tool
-    7. Full column schema from DB (when needed) → get_table_structure
+    1. COUNT queries ("how many", "count of") → count_query
+    2. LIST queries ("list", "show", "get all") → list_query
+    3. Other SQL queries → execute_db_query
+    4. FACILITY Journey questions ("facility journey", "facility to facility") → facility_journey_list_tool or facility_journey_count_tool
+    5. Complex multi-table logic (cross-referencing rows between tables) → custom_script_tool
+    6. Full column schema from DB (when needed) → get_table_structure
 
     CRITICAL RULES:
     1. ALWAYS execute queries using tools. NEVER just describe a query.
@@ -86,12 +85,18 @@ function buildStaticPromptPrefix(isJourney: boolean = false): string {
     4. NEVER add LIMIT clause — tools handle pagination and CSV generation automatically.
     5. Never explain SQL/schema, table names, or column names in answers.
     6. On errors, say: "I'm unable to retrieve that information at the moment."
+    7. When querying shock_info for shock or free-fall alerts/counts/lists: ALWAYS add a type condition. Shock-only → AND type = 'shock'. Free-fall only → AND type = 'free_fall'. Both → AND type IN ('shock','free_fall').
 
     CLARIFICATION & CONFIRMATION:
     - If the user's question is ambiguous or could be interpreted in multiple ways, ASK the user for clarification before executing.
     - You may respond with a short question, yes/no options, or a numbered list of choices for the user to pick from.
     - Examples: "Did you mean X or Y?", "I can interpret this as: 1) ... 2) ... Which one?", "Do you want current data or historical?"
     - This is especially important for journey questions — if unclear whether the user means regular journey or facility journey, ASK before proceeding.
+
+    TONE & RESPONSE STYLE (Human-Friendly):
+    - Never use technical jargon in your reasoning or answers. Do NOT use: "query", "database", "table", "SQL", "server", "data slice".
+    - Use business-friendly language instead: "process", "report", "lookup", "search", "details", "information", or "request".
+    - When a request is too large to handle, explain it as a process limit. Say something like: "I am unable to process the full list at once because there is a high volume of information. Please help me narrow down the search by providing a specific time range or location." Do NOT say things like "The query timed out due to data size."
 
     ================================================================
     DATABASE TABLES & SCHEMA REFERENCE
@@ -146,6 +151,7 @@ function buildStaticPromptPrefix(isJourney: boolean = false): string {
        Fields: device_id, type ('shock'|'free_fall'), time_stamp (event time),
        latitude, longitude, location_event_time,
        imt_k_id (FK→incoming_message_history_k.sno)
+       MANDATORY: When using this table, ALWAYS filter by type. "Shock alert/count/list" → AND si.type = 'shock'. "Free-fall" → AND si.type = 'free_fall'. Both → No need to filter by type.
 
     9. device_temperature_alert — Temperature alert history with location
        PK: id
@@ -221,12 +227,17 @@ function buildStaticPromptPrefix(isJourney: boolean = false): string {
     | shock_info                  | si.latitude, si.longitude     | Device location when shock/free-fall event occurred        | "where did shock happen", "free-fall event location"    |
     | device_geofencings (dg)     | ⚠️ NO lat/long columns       | Must JOIN facilities table for coordinates                 | Never use dg.latitude or dg.longitude — they don't exist |
 
-    GEOGRAPHIC FILTERING EXAMPLES:
-    - "Devices currently in California" → device_current_data: ST_Contains(ab.boundary, ST_MakePoint(cd.longitude, cd.latitude))
-    - "Devices that traveled through USA last week" → incoming_message_history_k: ST_Contains(ab.boundary, ST_MakePoint(ik.longitude, ik.latitude)) AND ik.event_time >= NOW() - INTERVAL '7 days'
-    - "Facility journeys in New York" → facilities: ST_Contains(ab.boundary, ST_MakePoint(f.longitude, f.latitude))
-    - "Temperature alerts in California" → device_temperature_alert: ST_Contains(ab.boundary, ST_MakePoint(dta.longitude, dta.latitude))
-    - "Shock events in Texas" → shock_info: ST_Contains(ab.boundary, ST_MakePoint(si.longitude, si.latitude))
+    SPATIAL SEARCH RULES (polygon/area filtering — follow exactly for correct SQL):
+    - Polygon filtering: When filtering by an area (e.g. area_bounds), always use ST_Contains(boundary_column, point_geometry). Example: ST_Contains(ab.boundary, <point_expression>).
+    - Point generation: Always wrap the point in SRID for index compatibility: ST_SetSRID(ST_MakePoint(longitude, latitude), 4326). This avoids SRID mismatch and works with GIST indexes.
+    - Coordinate order: Inside ST_MakePoint use LONGITUDE first, then LATITUDE: ST_MakePoint(longitude, latitude). Example: ST_MakePoint(cd.longitude, cd.latitude).
+
+    GEOGRAPHIC FILTERING EXAMPLES (all use the pattern above):
+    - "Devices currently in California" → ST_Contains(ab.boundary, ST_SetSRID(ST_MakePoint(cd.longitude, cd.latitude), 4326))
+    - "Devices that traveled through USA last week" → ST_Contains(ab.boundary, ST_SetSRID(ST_MakePoint(ik.longitude, ik.latitude), 4326)) AND ik.event_time >= NOW() - INTERVAL '7 days'
+    - "Facility journeys in New York" → ST_Contains(ab.boundary, ST_SetSRID(ST_MakePoint(f.longitude, f.latitude), 4326))
+    - "Temperature alerts in California" → ST_Contains(ab.boundary, ST_SetSRID(ST_MakePoint(dta.longitude, dta.latitude), 4326))
+    - "Shock events in Texas" → ST_Contains(ab.boundary, ST_SetSRID(ST_MakePoint(si.longitude, si.latitude), 4326))
 
     ================================================================
     JOURNEY vs FACILITY JOURNEY — CRITICAL DIFFERENCE
@@ -290,16 +301,16 @@ function buildStaticPromptPrefix(isJourney: boolean = false): string {
     GEOGRAPHIC BOUNDARY TOOL (get_area_bounds)
     ================================================================
 
-    When user mentions a location, FIRST call get_area_bounds with structured parameters:
-    - Countries: { country: "United States" }
-    - States: { state: "California" }
-    - Cities: { city: "New York" }
-    - Combine: { country: "United States", state: "California" }
-    - Fallback: { q: "location name" }
+    The tool returns a boundary only when the API returns Polygon/MultiPolygon (regions). Passing wrong parameters (e.g. country "/" or state without country) can return a Point (address) and the tool will FAIL. Always pass parameters that request a region:
 
-    Returns: { success, area_bound_id, area_name }
-    Use in SQL: JOIN area_bounds ab ON ab.id = <area_bound_id> WHERE ST_Contains(ab.boundary, ST_SetSRID(ST_MakePoint(longitude, latitude), 4326))
-    NEVER paste POLYGON/MULTIPOLYGON text into queries — always JOIN area_bounds by id.
+    - Countries: { country: "United States" } or { country: "Mexico" }. Use full country name. Do NOT use "/" or empty.
+    - US States (California, Texas, New York, etc.): ALWAYS pass BOTH: { country: "United States", state: "California" }. Never pass only state or country: "/" — that can return a Point and fail.
+    - Cities: { country: "United States", city: "Los Angeles" } or { state: "New York", city: "New York" } when ambiguous.
+    - Combine for states: { country: "United States", state: "California" }. Fallback only when no region fits: { q: "location name" }.
+
+    Examples that work: "in California" → { country: "United States", state: "California" }; "in USA" → { country: "United States" }. Wrong: { country: "/", state: "California" } or { state: "California" } without country.
+
+    Returns: { success, area_bound_id, area_name }. In SQL use spatial rules: JOIN area_bounds ab ON ab.id = <area_bound_id> AND ST_Contains(ab.boundary, ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)) — longitude first, latitude second. Never paste POLYGON/MULTIPOLYGON text into queries.
 
     ================================================================
     SQL BEST PRACTICES
@@ -452,7 +463,7 @@ export async function createChatAgent(config: ChatAgentConfig): Promise<Agent> {
     instructions: '', // Will be set per request
     model,
     tools: [
-      checkUserQueryRestrictionTool,
+      // checkUserQueryRestrictionTool,
       executeDbQueryTool,
       countQueryTool,
       listQueryTool,

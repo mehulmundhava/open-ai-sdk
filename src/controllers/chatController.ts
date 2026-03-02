@@ -1,111 +1,20 @@
 import { ChatRequest, ChatResponse } from '../models/schemas';
 import { createChatAgent, runChatAgent } from '../agents/chatAgent';
 import { VectorStoreService } from '../services/vectorStore';
-import { securityCheck, ChatHistoryEntry } from '../utils/securityCheck';
+import { securityCheck } from '../utils/securityCheck';
 import { TokenTracker } from '../utils/tokenTracker';
 import { logger, createRequestLogger } from '../utils/logger';
 import { v4 as uuidv4 } from 'uuid';
 import { AiChat, AiChatMessage } from '../models';
 import { getAiModelName } from '../config/aiSettings';
-
-/** Strip localhost or any origin from download-csv URLs so response never exposes API base URL. */
-function stripLocalhostFromCsvLinks(text: string): string {
-  if (!text || !text.includes('download-csv')) return text;
-  const before = text;
-  // Literal first (most reliable): replace exact localhost URL with relative path
-  let out = text.split('http://localhost:3009/download-csv/').join('/download-csv/');
-  out = out.split('https://localhost:3009/download-csv/').join('/download-csv/');
-  out = out.replace(/https?:\/\/[^/]*\/download-csv\//g, '/download-csv/');
-  out = out.replace(/sandbox:\/download-csv\//g, '/download-csv/');
-  const changed = out !== before;
-  if (changed || before.includes('localhost')) {
-    logger.info('🔗 [Controller] stripLocalhostFromCsvLinks', {
-      hadLocalhost: before.includes('localhost'),
-      changed,
-      stillHasLocalhost: out.includes('localhost'),
-    });
-  }
-  return out;
-}
-
-/** Build a minimal token summary from full token usage report (for logs and API response). */
-function simplifyTokenUsage(tokenUsage: any): { prompt: number; completion: number; total: number; cached?: number; stagesCount?: number } | undefined {
-  if (!tokenUsage?.total) return undefined;
-  const t = tokenUsage.total;
-  const cached = t.cachedTokens ?? tokenUsage.stages?.reduce?.((s: number, st: any) => s + (st.tokens?.cachedTokens ?? 0), 0);
-  return {
-    prompt: t.promptTokens ?? 0,
-    completion: t.completionTokens ?? 0,
-    total: t.totalTokens ?? 0,
-    ...(cached > 0 && { cached }),
-    ...(Array.isArray(tokenUsage.stages) && { stagesCount: tokenUsage.stages.length }),
-  };
-}
-
-/** Build tools_used as object keyed by tool name with token usage per tool (attributed from stages in order). */
-function buildToolsUsedWithTokens(result: { toolCalls?: Array<{ tool: string; input?: any }>; tokenUsage?: any }): Record<
-  string,
-  { prompt: number; completion: number; total: number; call_count?: number }
-> {
-  const toolCalls = result.toolCalls ?? [];
-  const stages = result.tokenUsage?.stages;
-  // Use only stages that have non-zero usage (avoid duplicate entries like .providerData / .usage)
-  const stagesWithUsage = Array.isArray(stages)
-    ? stages.filter((s: any) => (s.tokens?.promptTokens ?? 0) > 0 || (s.tokens?.completionTokens ?? 0) > 0)
-    : [];
-  // Dedupe by (prompt, completion) so we count each distinct API call once
-  const seen = new Set<string>();
-  const uniqueStages = stagesWithUsage.filter((s: any) => {
-    const key = `${s.tokens?.promptTokens ?? 0}-${s.tokens?.completionTokens ?? 0}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-
-  const zero = { prompt: 0, completion: 0, total: 0 };
-  const perCall: Array<{ prompt: number; completion: number; total: number }> = toolCalls.map((_, i) => {
-    const stage = uniqueStages[i];
-    if (!stage?.tokens) return zero;
-    return {
-      prompt: stage.tokens.promptTokens ?? 0,
-      completion: stage.tokens.completionTokens ?? 0,
-      total: stage.tokens.totalTokens ?? 0,
-    };
-  });
-
-  const byTool: Record<string, { prompt: number; completion: number; total: number; call_count: number }> = {};
-  toolCalls.forEach((tc, i) => {
-    const name = tc.tool;
-    const usage = perCall[i] ?? zero;
-    if (!byTool[name]) {
-      byTool[name] = { prompt: 0, completion: 0, total: 0, call_count: 0 };
-    }
-    byTool[name].prompt += usage.prompt;
-    byTool[name].completion += usage.completion;
-    byTool[name].total += usage.total;
-    byTool[name].call_count += 1;
-  });
-  return byTool;
-}
-
-/**
- * Normalize SQL query by removing line breaks and extra whitespace
- * Makes the query executable in adminer.php and other SQL tools
- */
-function normalizeSqlQuery(sqlQuery: string | undefined): string | undefined {
-  if (!sqlQuery) return undefined;
-
-  // Replace line breaks (\n, \r\n, \r) with spaces
-  let normalized = sqlQuery.replace(/\r\n/g, ' ').replace(/\n/g, ' ').replace(/\r/g, ' ');
-
-  // Replace multiple consecutive spaces with a single space
-  normalized = normalized.replace(/\s+/g, ' ');
-
-  // Trim leading and trailing whitespace
-  normalized = normalized.trim();
-
-  return normalized;
-}
+import {
+  type ToolCallItem,
+  stripLocalhostFromCsvLinks,
+  getLastBunchFromHistory,
+  extractSqlFromMessageSubArray,
+  getLastSqlFromToolCalls,
+  normalizeSqlQuery,
+} from './helper/chatControllerHelpers';
 
 /**
  * Process chat request and return response
@@ -150,35 +59,11 @@ export async function processChat(
     throw new Error('Session ID is not proper');
   }
 
-  // Security check for non-admin users
+  // Security check for non-admin users (no chat history; short non-threatening answers allowed via fast path)
   let securityFailureReason: string | undefined;
   if (userId && userId.toLowerCase() !== 'admin') {
     try {
-      // Fetch recent chat history from DB to give the security guard context
-      // This is critical for follow-up replies (e.g. "A->shock alert") to be understood correctly
-      let securityChatHistory: ChatHistoryEntry[] = [];
-      try {
-        const recentMessages = await AiChatMessage.findAll({
-          where: { chat_id: chatId },
-          order: [['created_at', 'DESC']],
-          limit: 5,
-          attributes: ['user_message', 'response_message'],
-          raw: true,
-        }) as any[];
-        // Reverse so history is oldest-first, then flatten into user/assistant pairs
-        securityChatHistory = recentMessages.reverse().flatMap((msg: any) => {
-          const entries: ChatHistoryEntry[] = [];
-          if (msg.user_message) entries.push({ role: 'user', content: msg.user_message });
-          if (msg.response_message) entries.push({ role: 'assistant', content: msg.response_message.substring(0, 300) });
-          return entries;
-        });
-      } catch (histErr: any) {
-        requestLogger.warn('⚠️  Could not fetch chat history for security check (continuing without it)', {
-          error: histErr?.message,
-        });
-      }
-
-      const securityResult = await securityCheck(payload.question, userId, securityChatHistory);
+      const securityResult = await securityCheck(payload.question, userId);// { allowed: true, reason: 'Query allowed by security check' }; 
       if (!securityResult.allowed) {
         securityFailureReason = securityResult.reason || 'Query blocked by security check';
         requestLogger.warn(`🔒 Security check BLOCKED query`, {
@@ -262,6 +147,11 @@ export async function processChat(
     );
     const elapsedTime = Date.now() - startTime;
 
+    // Log result to file only (no console) to avoid noisy console output
+    requestLogger.fileOnly.info('💬 RESULT', {
+      result,
+    });
+
     // Update last_message_at after processing
     try {
       await chatEntry.update({
@@ -275,42 +165,33 @@ export async function processChat(
 
     requestLogger.info(`[chat] agent done in ${elapsedTime}ms`);
 
-    const tokenSummary = simplifyTokenUsage(result.tokenUsage);
-    const tools_used = buildToolsUsedWithTokens(result);
+    const allToolCalls = (result.toolCalls ?? []) as ToolCallItem[];
+
+    // Chain of thought: (1) extract last bunch from history (from end until role:'user')
+    const lastBunchMessages = getLastBunchFromHistory(result.history);
+    requestLogger.info('💬 LAST BUNCH MESSAGES', {
+      lastBunchMessages,
+    });
+    // (2) from last-bunch messages sub-array, extract last SQL query
+    const lastSql =
+      extractSqlFromMessageSubArray(lastBunchMessages) ?? getLastSqlFromToolCalls(allToolCalls);
+    const responseSqlQuery = lastSql?.query ?? result.sqlQuery;
+    const executeDbQuerySql = lastSql?.executeDbQuerySql;
+    const journeyToolSql = lastSql?.journeyToolSql;
+
     requestLogger.info('💬 SUMMARY', {
       requestId,
       question: payload.question?.substring(0, 60),
       answerLen: result.answer?.length ?? 0,
       hasSql: !!result.sqlQuery,
-      toolCalls: result.toolCalls?.length ?? 0,
-      toolErrors: result.toolErrors?.length ?? 0,
       elapsedMs: elapsedTime,
-      tokens: tokenSummary,
     });
-
-    // Check if execute_db_query tool was used
-    type ToolCallItem = { tool: string; input?: { query?: string; sql?: string } };
-    const executeDbQueryCall = result.toolCalls?.find(
-      (tc: ToolCallItem) => tc.tool === 'execute_db_query'
-    );
-    const executeDbQuerySql = executeDbQueryCall?.input?.query ||
-      (executeDbQueryCall?.input?.sql ? executeDbQueryCall.input.sql : undefined) ||
-      result.sqlQuery;
-
-    // Also check journey tools for SQL
-    const journeyToolCall = result.toolCalls?.find(
-      (tc: ToolCallItem) => tc.tool === 'facility_journey_list_tool' || tc.tool === 'facility_journey_count_tool'
-    );
-    const journeyToolSql = journeyToolCall?.input?.sql;
-
-    const totalCachedTokens = result.tokenUsage?.total?.cachedTokens
-      ?? result.tokenUsage?.stages?.reduce?.((sum: number, stage: any) => sum + (stage.tokens?.cachedTokens || 0), 0) ?? 0;
 
     // Process answer to strip localhost URLs (already done in agentResponseProcessor, but double-check)
     const processedAnswer = stripLocalhostFromCsvLinks(result.answer);
 
-    // Normalize SQL query (remove line breaks and extra whitespace)
-    const normalizedSqlQuery = normalizeSqlQuery(result.sqlQuery);
+    // Normalize SQL query (remove line breaks and extra whitespace) — use last SQL
+    const normalizedSqlQuery = normalizeSqlQuery(responseSqlQuery);
 
     // Model name from DB (same source as agent) for accurate llm_type in response
     const aiModelName = await getAiModelName();
@@ -328,13 +209,8 @@ export async function processChat(
       debug: {
         request_id: requestId,
         elapsed_time_ms: elapsedTime,
-        token_usage: tokenSummary ?? { prompt: 0, completion: 0, total: 0 },
-        tools_used,
-        cached_tokens: totalCachedTokens,
-        tool_calls_count: result.toolCalls?.length ?? 0,
-        tool_errors_count: result.toolErrors?.length ?? 0,
         sql_query: normalizedSqlQuery,
-        execute_db_query: executeDbQuerySql || journeyToolSql || undefined,
+        execute_db_query: executeDbQuerySql ?? journeyToolSql ?? undefined,
         query_result: result.queryResult,
         conversation: {
           question: payload.question,
@@ -353,13 +229,10 @@ export async function processChat(
       });
     }
 
-    // Log if SQL query is missing
-    if (!result.sqlQuery && result.toolCalls && result.toolCalls.length > 0) {
+    // Log if SQL query is missing (after using last SQL from tool calls)
+    if (!normalizedSqlQuery && allToolCalls.length > 0) {
       requestLogger.warn('⚠️  SQL query not extracted from tool calls', {
-        toolCalls: result.toolCalls.map((tc: any) => ({
-          tool: tc.tool,
-          input: tc.input,
-        })),
+        toolCalls: allToolCalls.map((tc) => ({ tool: tc.tool, input: tc.input })),
       });
     }
 

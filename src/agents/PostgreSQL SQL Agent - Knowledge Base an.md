@@ -63,18 +63,22 @@ PostgreSQL SQL Agent - Knowledge Base and Instructions
     - For geographic filtering: use the area_bound_id from get_area_bounds and JOIN area_bounds (e.g. alias ab). Use ST_Contains(ab.boundary, point) - do NOT embed POLYGON or MULTIPOLYGON text in the query
     - NEVER use placeholder text like \"...coordinates...\" - use the area_bound_id from the tool and JOIN area_bounds
 
+    Spatial Search Rules (polygon/area filtering — use in all geographic SQL):
+    - Polygon filtering: Always use ST_Contains(boundary_column, point_geometry). Example: ST_Contains(ab.boundary, <point_expression>).
+    - Point generation: Use ST_SetSRID(ST_MakePoint(longitude, latitude), 4326) for GIST index compatibility and to avoid SRID mismatch.
+    - Coordinate order: LONGITUDE first, then LATITUDE inside ST_MakePoint: ST_MakePoint(longitude, latitude).
+
     Geographic Boundary Tool (get_area_bounds):
-    - When user asks about a specific location (city, state, country, region), FIRST call get_area_bounds tool with STRUCTURED parameters
-    - CRITICAL: Use proper parameter keys based on location type:
-      * For COUNTRIES: use { country: \"United States\" } or { country: \"Mexico\" }
-      * For STATES/PROVINCES: use { state: \"California\" } or { state: \"Texas\" }
-      * For CITIES: use { city: \"New York\" } or { city: \"Los Angeles\" }
-      * For GENERAL queries: use { q: \"location name\" } only as fallback
-      * You can combine: { country: \"United States\", state: \"California\" }
-    - Examples:
+    - The tool succeeds only when the API returns a region boundary (Polygon/MultiPolygon). Wrong parameters (e.g. country \"/\" or state without country) can return a Point and FAIL. Always pass parameters that request a region.
+    - CRITICAL parameter rules:
+      * For COUNTRIES: { country: \"United States\" } or { country: \"Mexico\" }. Never use \"/\" or empty string.
+      * For US STATES (California, Texas, New York, etc.): ALWAYS pass BOTH country and state: { country: \"United States\", state: \"California\" }. Never pass only state or country: \"/\" — that can return a Point and fail.
+      * For CITIES: { country: \"United States\", city: \"Los Angeles\" } or { state: \"New York\", city: \"New York\" } when ambiguous.
+      * Combine for states: { country: \"United States\", state: \"California\" }. Use { q: \"location name\" } only as fallback when no region fits.
+    - Examples that work:
       * \"devices in United States\" → get_area_bounds({ country: \"United States\" })
-      * \"shipments in California\" → get_area_bounds({ state: \"California\" })
-      * \"facilities in New York\" → get_area_bounds({ city: \"New York\" }) or { state: \"New York\" }
+      * \"shipments in California\" / \"in californiya\" → get_area_bounds({ country: \"United States\", state: \"California\" })
+      * \"facilities in New York\" → get_area_bounds({ country: \"United States\", city: \"New York\" }) or ({ country: \"United States\", state: \"New York\" } for state)
       * \"journeys in Mexico\" → get_area_bounds({ country: \"Mexico\" })
     - The tool returns success, area_bound_id, and area_name. Use area_bound_id in your SQL: JOIN area_bounds ab ON ab.id = <area_bound_id> and filter with ST_Contains(ab.boundary, ST_SetSRID(ST_MakePoint(longitude, latitude), 4326))
     - If the tool fails, inform the user that the area boundary could not be determined

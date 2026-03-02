@@ -68,7 +68,7 @@ if (settings.logToFile) {
   );
 }
 
-// Create logger instance
+// Create logger instance (file + console per settings)
 export const logger = winston.createLogger({
   level: settings.logLevel.toLowerCase(),
   format: logFormat,
@@ -76,12 +76,47 @@ export const logger = winston.createLogger({
   exitOnError: false,
 });
 
+// File-only transports (no console) for logs that should not go to console
+const fileOnlyTransports: winston.transport[] = [];
+if (settings.logToFile) {
+  fileOnlyTransports.push(
+    new winston.transports.File({
+      filename: path.join(logDir, 'app.log'),
+      format: logFormat,
+      level: 'debug',
+      maxsize: 10 * 1024 * 1024, // 10MB
+      maxFiles: settings.logRetentionDays,
+    })
+  );
+  fileOnlyTransports.push(
+    new winston.transports.File({
+      filename: path.join(logDir, 'error.log'),
+      format: logFormat,
+      level: 'error',
+      maxsize: 10 * 1024 * 1024, // 10MB
+      maxFiles: settings.logRetentionDays,
+    })
+  );
+}
+
+/** Logger that writes only to file (no console). Use for verbose/noisy logs (e.g. full RESULT). */
+export const loggerFileOnly = winston.createLogger({
+  level: settings.logLevel.toLowerCase(),
+  format: logFormat,
+  transports: fileOnlyTransports.length > 0 ? fileOnlyTransports : [new winston.transports.Console({ silent: true })],
+  exitOnError: false,
+});
+
+export type RequestLogger = winston.Logger & {
+  /** Log only to file (not console). Use for high-volume or sensitive entries. */
+  fileOnly: winston.Logger;
+};
+
 // Helper function to create child logger with request context
-export function createRequestLogger(requestId: string, userId?: string) {
-  return logger.child({
-    requestId,
-    userId,
-  });
+export function createRequestLogger(requestId: string, userId?: string): RequestLogger {
+  const child = logger.child({ requestId, userId });
+  const fileOnlyChild = loggerFileOnly.child({ requestId, userId });
+  return Object.assign(child, { fileOnly: fileOnlyChild }) as RequestLogger;
 }
 
 // Export default logger
