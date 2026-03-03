@@ -477,16 +477,16 @@ FACILITY ACCESS (role_id=${roleInfo.roleId}):
       prompt += `- Super-admin: full access to all facilities. No facility filtering needed.\n`;
     } else if (roleInfo.roleId === 2 && roleInfo.companyId != null) {
       prompt += `- Company user: MUST filter facilities by company_id = ${roleInfo.companyId}
-- Whenever the facilities table (f) appears in a query, add: f.company_id = ${roleInfo.companyId}
-- For device_geofencings joins: LEFT JOIN facilities f ON f.facility_id = dg.facility_id AND f.company_id = ${roleInfo.companyId}
-- For direct facility queries: WHERE f.company_id = ${roleInfo.companyId}
-`;
+      - Whenever the facilities table (f) appears in a query, add: f.company_id = ${roleInfo.companyId}
+      - For device_geofencings joins: LEFT JOIN facilities f ON f.facility_id = dg.facility_id AND f.company_id = ${roleInfo.companyId}
+      - For direct facility queries: WHERE f.company_id = ${roleInfo.companyId}
+      `;
     } else if (roleInfo.roleId === 3 && roleInfo.adminUserId != null) {
       prompt += `- Sub-user: MUST filter facilities via facility_sub_users table with user_id = ${roleInfo.adminUserId}
-- Whenever the facilities table (f) appears in a query, add:
-  JOIN facility_sub_users fsu ON fsu.facility_id = f.facility_id AND fsu.user_id = ${roleInfo.adminUserId}
-- For direct facility queries: JOIN facility_sub_users fsu ON fsu.facility_id = f.facility_id WHERE fsu.user_id = ${roleInfo.adminUserId}
-`;
+      - Whenever the facilities table (f) appears in a query, add:
+        JOIN facility_sub_users fsu ON fsu.facility_id = f.facility_id AND fsu.user_id = ${roleInfo.adminUserId}
+      - For direct facility queries: JOIN facility_sub_users fsu ON fsu.facility_id = f.facility_id WHERE fsu.user_id = ${roleInfo.adminUserId}
+      `;
     }
   }
 
