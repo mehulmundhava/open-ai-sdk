@@ -108,15 +108,15 @@ function buildStaticPromptPrefix(isJourney: boolean = false): string {
        PK: sno | UK: device_id
        Fields: device_id, device_name, imei, grai_id, iccid, imsi
        ### Indexes
-       - device_details_table_pkey: Primary key on sno.
-       - device_details_table_device_id_key: Unique device_id lookup for metadata.
+       - (sno) UNIQUE
+       - (device_id) UNIQUE
 
     2. user_device_assignment (UD) — User→device access mapping. ALWAYS join for user filtering.
        PK: id
        Fields: user_id (FK→admin.id), device_id (FK→*.device_id)
        ### Indexes
-       - user_device_assignment_device_id_user_id: Lookup by device and user.
-       - user_device_assignment_user_id_device_id: Lookup by user and device.
+       - (device_id, user_id)
+       - (user_id, device_id)
 
     3. device_current_data (CD) — Current/latest device snapshot (location, sensors, alerts)
        PK: id | UK: device_id
@@ -129,21 +129,22 @@ function buildStaticPromptPrefix(isJourney: boolean = false): string {
        shock_id (FK→shock_info.id), shock_event_time (use for "devices w/ shock after [date]" — avoid joining shock_info),
        free_fall_id (FK→shock_info.id), free_fall_event_time (same for free-fall)
        ### Indexes
-       - device_current_data_facility_id: Filter current data by facility.
-       - device_current_data_device_id_key: Unique device lookup for current snapshot.
-       - device_current_data_pkey: Primary key on id.
-       - idx_device_id_free_fall_event_time: Free-fall queries by device and time.
-       - idx_device_name: Lookup and filter by device name.
-       - idx_dwell_time_seconds: Filter and sort by dwell time.
-       - idx_event_time: Range scans and sort by event time.
-       - idx_free_fall_event_time: Free-fall time range and sorting.
-       - idx_shock_event_time: Shock time range and sorting.
-       - idx_device_current_data_geom: Spatial queries on device location.
-       - idx_device_id_shock_event_time: Shock queries by device and time.
-       - idx_device_id_facility_type: Filter by device and facility type.
-       - idx_device_id_facility_id: Filter by device and facility.
-       - idx_device_id_event_time: Device event time range scans.
-       - idx_device_id_dwell_time_seconds: Device dwell time filtering.
+       - (facility_id)
+       - (device_id) UNIQUE
+       - (id) UNIQUE
+       - (device_id, free_fall_event_time)
+       - (device_name)
+       - (dwell_time_seconds)
+       - (event_time)
+       - (free_fall_event_time)
+       - (shock_event_time)
+       - (longitude, latitude) -> GIS (GiST)
+       - (device_id, longitude, latitude) -> GIS Composite (GiST)
+       - (device_id, shock_event_time)
+       - (device_id, facility_type)
+       - (device_id, facility_id)
+       - (device_id, event_time)
+       - (device_id, dwell_time_seconds)
 
     4. incoming_message_history_k (IK) — Historical device location/sensor log
        PK: sno
@@ -153,19 +154,19 @@ function buildStaticPromptPrefix(isJourney: boolean = false): string {
        dwell_time (human), dwell_timestamp (sec),
        travel_distance (meters), accuracy (meters), altitude (meters), address (JSON)
        ### Indexes
-       - idx_incoming_msg_spatial: Spatial queries on message location.
-       - incoming_message_history_k_device_id_event_time_idx: Device and event time ordering.
-       - idx_incoming_k_composite: Composite device, time, and location.
-       - idx_sno_event_time: Sno and event time ordering.
+       - (longitude, latitude) -> GIS (GiST)
+       - (device_id, event_time, longitude, latitude) -> GIS Composite (GiST)
+       - (device_id, event_time) DESC
+       - (sno, event_time) DESC
 
     5. device_geofencings (DG) — Facility entry/exit records. ⚠️ NO latitude/longitude columns.
        PK: id
        Fields: device_id, facility_id (FK→facilities), facility_type,
        entry_event_time, exit_event_time, facility_last_event_time
        ### Indexes
-       - idx_geofencing_facility_entry_device_exit: Facility entry/exit and device filtering.
-       - idx_device_facility_all_times: Device, facility, and time range queries.
-       - idx_dg_device_type_lasttime_entrytime: Device type and event time ordering.
+       - (facility_type, entry_event_time, exit_event_time, device_id)
+       - (device_id, facility_type, entry_event_time, exit_event_time, facility_last_event_time)
+       - (device_id, facility_type, facility_last_event_time, entry_event_time)
 
     6. facilities (F) — Facility/warehouse info with coordinates
        PK: id | UK: facility_id
@@ -173,18 +174,24 @@ function buildStaticPromptPrefix(isJourney: boolean = false): string {
        latitude, longitude, street, city, state, zip_code,
        company_id (FK→admin.company_id for role_id=2), is_active (0=inactive, 1=active)
        ### Indexes
-       - facilities_facility_type: Filter by facility type.
-       - idx_facilities_company_not_deleted: Company filtering for facilities.
-       - idx_facilities_lat_lng: Lat/long range and proximity queries.
-       - idx_facilities_geom: Spatial queries on facility location.
-       - uniq_facility_id: Unique facility_id lookup.
-       - facilities_facility_id_company_id: Facility and company composite lookup.
-       - facilities_facility_name: Lookup by facility name.
-       - facilities_is_active: Filter active versus inactive facilities.
+       - (facility_type)
+       - (company_id)
+       - (latitude, longitude)
+       - (longitude, latitude) -> GIS (GiST)
+       - (facility_id, longitude, latitude) -> GIS Composite (GiST)
+       - (company_id, longitude, latitude) -> GIS Composite (GiST)
+       - (facility_id) UNIQUE
+       - (facility_id, company_id)
+       - (facility_name)
+       - (is_active)
 
     7. sensor (S) — Temperature/battery sensor readings history
        PK: id | UK: imt_id (FK→incoming_message_history_k.sno)
        Fields: device_id, temperature (°C), battery (%), event_time
+       ### Indexes
+       - (device_id, event_time)
+       - (event_time) DESC
+       - (id) UNIQUE
 
     8. shock_info — Full shock/free-fall event history (large table — avoid for simple "list devices w/ shock")
        PK: id
@@ -193,7 +200,9 @@ function buildStaticPromptPrefix(isJourney: boolean = false): string {
        imt_k_id (FK→incoming_message_history_k.sno)
        MANDATORY: When using this table, ALWAYS filter by type. "Shock alert/count/list" → AND si.type = 'shock'. "Free-fall" → AND si.type = 'free_fall'. Both → No need to filter by type.
        ### Indexes
-       - shock_info_device_id_type_time_stamp: Device, type, and time filtering and ordering.
+       - (device_id, type, time_stamp) DESC
+       - (longitude, latitude) -> GIS (GiST)
+       - (device_id, longitude, latitude) -> GIS Composite (GiST)
 
     9. device_temperature_alert — Temperature alert history with location
        PK: id
@@ -202,6 +211,14 @@ function buildStaticPromptPrefix(isJourney: boolean = false): string {
        status (0=inactive, 1=active — becomes 1 when temp outside threshold > threshold_duration),
        latitude, longitude, location_event_time,
        imt_k_id (FK→incoming_message_history_k.sno)
+       ### Indexes
+       - (device_id, end_time)
+       - (device_id, status)
+       - (device_id)
+       - (device_id, start_time, end_time) DESC
+       - (id) UNIQUE
+       - (start_time, end_time) DESC
+       - (longitude, latitude) -> GIS (GiST)
 
     10. device_alerts — Last alert per device (simplified view)
         PK: id | UK: device_id
@@ -210,6 +227,13 @@ function buildStaticPromptPrefix(isJourney: boolean = false): string {
         max_temperature, max_temperature_event_time, max_temperature_sensor_id (FK→sensor.id),
         battery, battery_event_time, battery_sensor_id (FK→sensor.id),
         light, light_event_time, light_id (FK→light_data.id)
+        ### Indexes
+        - (device_id, battery_event_time)
+        - (device_id, max_temperature_event_time)
+        - (device_id, min_temperature_event_time)
+        - (battery_event_time)
+        - (max_temperature_event_time)
+        - (min_temperature_event_time)
 
     11. device_settings_data — Current device thresholds
         PK: id | UK: device_id
@@ -218,18 +242,18 @@ function buildStaticPromptPrefix(isJourney: boolean = false): string {
         ltdth (low temp duration sec), htdth (high temp duration sec),
         lbth (low battery %), hdth (high dwell-time sec)
         ### Indexes
-        - device_settings_data_device_id_key: Unique device_id for current settings lookup.
+        - (device_id) UNIQUE
 
     12. device_settings_history — Threshold change history
         PK: id
         Fields: device_id, name (ltth/htth/ltdth/htdth/lbth/hdth),
         value, value_type (real/integer), start_time, end_time
         ### Indexes
-        - device_settings_history_device_id: Lookup by device_id.
-        - device_settings_history_device_id_name: Device and setting name lookup.
-        - device_settings_history_device_id_end_time: Device and end time range.
-        - device_settings_history_device_id_start_time: Device and start time range.
-        - device_settings_history_pkey: Primary key on id.
+        - (device_id)
+        - (device_id, name)
+        - (device_id, end_time)
+        - (device_id, start_time)
+        - (id) UNIQUE
 
     13. area_bounds (AB) — Geographic boundaries (populated by get_area_bounds tool)
         PK: id
@@ -243,17 +267,17 @@ function buildStaticPromptPrefix(isJourney: boolean = false): string {
         PK: id
         Fields: user_id (FK→admin.user_id), facility_id (FK→facilities.facility_id)
         ### Indexes
-        - facility_sub_users_company_id: Filter by company.
-        - facility_sub_users_facility_id: Lookup by facility.
-        - facility_sub_users_user_id: Lookup by user.
-        - facility_sub_users_facility_id_user_id: Unique facility-user pair.
+        - (company_id)
+        - (facility_id)
+        - (user_id)
+        - (facility_id, user_id) UNIQUE
 
     16. light_data — Light sensor readings
         PK: id
         Fields: device_id, event_time, light (lux),
         imt_id (FK→incoming_message_history_k.sno)
         ### Indexes
-        - light_data_device_id_event_time: Device and event time ordering.
+        - (device_id, event_time) DESC
 
     ================================================================
     FACILITY ACCESS BY ROLE
