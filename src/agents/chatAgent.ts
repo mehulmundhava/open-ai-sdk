@@ -107,10 +107,16 @@ function buildStaticPromptPrefix(isJourney: boolean = false): string {
     1. device_details_table (D) — Device information metadata, identifiers
        PK: sno | UK: device_id
        Fields: device_id, device_name, imei, grai_id, iccid, imsi
+       ### Indexes
+       - (sno) UNIQUE
+       - (device_id) UNIQUE
 
     2. user_device_assignment (UD) — User→device access mapping. ALWAYS join for user filtering.
        PK: id
        Fields: user_id (FK→admin.id), device_id (FK→*.device_id)
+       ### Indexes
+       - (device_id, user_id)
+       - (user_id, device_id)
 
     3. device_current_data (CD) — Current/latest device snapshot (location, sensors, alerts)
        PK: id | UK: device_id
@@ -122,6 +128,23 @@ function buildStaticPromptPrefix(isJourney: boolean = false): string {
        travel_distance (meters), dwell_time_seconds (sec), dwell_time (human: "1D"/"2H"/"10M"),
        shock_id (FK→shock_info.id), shock_event_time (use for "devices w/ shock after [date]" — avoid joining shock_info),
        free_fall_id (FK→shock_info.id), free_fall_event_time (same for free-fall)
+       ### Indexes
+       - (facility_id)
+       - (device_id) UNIQUE
+       - (id) UNIQUE
+       - (device_id, free_fall_event_time)
+       - (device_name)
+       - (dwell_time_seconds)
+       - (event_time)
+       - (free_fall_event_time)
+       - (shock_event_time)
+       - (longitude, latitude) -> GIS (GiST)
+       - (device_id, longitude, latitude) -> GIS Composite (GiST)
+       - (device_id, shock_event_time)
+       - (device_id, facility_type)
+       - (device_id, facility_id)
+       - (device_id, event_time)
+       - (device_id, dwell_time_seconds)
 
     4. incoming_message_history_k (IK) — Historical device location/sensor log
        PK: sno
@@ -130,21 +153,45 @@ function buildStaticPromptPrefix(isJourney: boolean = false): string {
        facility_id (FK→facilities), facility_type,
        dwell_time (human), dwell_timestamp (sec),
        travel_distance (meters), accuracy (meters), altitude (meters), address (JSON)
+       ### Indexes
+       - (longitude, latitude) -> GIS (GiST)
+       - (device_id, event_time, longitude, latitude) -> GIS Composite (GiST)
+       - (device_id, event_time) DESC
+       - (sno, event_time) DESC
 
     5. device_geofencings (DG) — Facility entry/exit records. ⚠️ NO latitude/longitude columns.
        PK: id
        Fields: device_id, facility_id (FK→facilities), facility_type,
        entry_event_time, exit_event_time, facility_last_event_time
+       ### Indexes
+       - (facility_type, entry_event_time, exit_event_time, device_id)
+       - (device_id, facility_type, entry_event_time, exit_event_time, facility_last_event_time)
+       - (device_id, facility_type, facility_last_event_time, entry_event_time)
 
     6. facilities (F) — Facility/warehouse info with coordinates
        PK: id | UK: facility_id
        Fields: facility_id, facility_name, facility_type (M/R/U/D),
        latitude, longitude, street, city, state, zip_code,
        company_id (FK→admin.company_id for role_id=2), is_active (0=inactive, 1=active)
+       ### Indexes
+       - (facility_type)
+       - (company_id)
+       - (latitude, longitude)
+       - (longitude, latitude) -> GIS (GiST)
+       - (facility_id, longitude, latitude) -> GIS Composite (GiST)
+       - (company_id, longitude, latitude) -> GIS Composite (GiST)
+       - (facility_id) UNIQUE
+       - (facility_id, company_id)
+       - (facility_name)
+       - (is_active)
 
     7. sensor (S) — Temperature/battery sensor readings history
        PK: id | UK: imt_id (FK→incoming_message_history_k.sno)
        Fields: device_id, temperature (°C), battery (%), event_time
+       ### Indexes
+       - (device_id, event_time)
+       - (event_time) DESC
+       - (id) UNIQUE
 
     8. shock_info — Full shock/free-fall event history (large table — avoid for simple "list devices w/ shock")
        PK: id
@@ -152,6 +199,10 @@ function buildStaticPromptPrefix(isJourney: boolean = false): string {
        latitude, longitude, location_event_time,
        imt_k_id (FK→incoming_message_history_k.sno)
        MANDATORY: When using this table, ALWAYS filter by type. "Shock alert/count/list" → AND si.type = 'shock'. "Free-fall" → AND si.type = 'free_fall'. Both → No need to filter by type.
+       ### Indexes
+       - (device_id, type, time_stamp) DESC
+       - (longitude, latitude) -> GIS (GiST)
+       - (device_id, longitude, latitude) -> GIS Composite (GiST)
 
     9. device_temperature_alert — Temperature alert history with location
        PK: id
@@ -160,6 +211,14 @@ function buildStaticPromptPrefix(isJourney: boolean = false): string {
        status (0=inactive, 1=active — becomes 1 when temp outside threshold > threshold_duration),
        latitude, longitude, location_event_time,
        imt_k_id (FK→incoming_message_history_k.sno)
+       ### Indexes
+       - (device_id, end_time)
+       - (device_id, status)
+       - (device_id)
+       - (device_id, start_time, end_time) DESC
+       - (id) UNIQUE
+       - (start_time, end_time) DESC
+       - (longitude, latitude) -> GIS (GiST)
 
     10. device_alerts — Last alert per device (simplified view)
         PK: id | UK: device_id
@@ -168,6 +227,13 @@ function buildStaticPromptPrefix(isJourney: boolean = false): string {
         max_temperature, max_temperature_event_time, max_temperature_sensor_id (FK→sensor.id),
         battery, battery_event_time, battery_sensor_id (FK→sensor.id),
         light, light_event_time, light_id (FK→light_data.id)
+        ### Indexes
+        - (device_id, battery_event_time)
+        - (device_id, max_temperature_event_time)
+        - (device_id, min_temperature_event_time)
+        - (battery_event_time)
+        - (max_temperature_event_time)
+        - (min_temperature_event_time)
 
     11. device_settings_data — Current device thresholds
         PK: id | UK: device_id
@@ -175,11 +241,19 @@ function buildStaticPromptPrefix(isJourney: boolean = false): string {
         ltth (low temp threshold °C), htth (high temp threshold °C),
         ltdth (low temp duration sec), htdth (high temp duration sec),
         lbth (low battery %), hdth (high dwell-time sec)
+        ### Indexes
+        - (device_id) UNIQUE
 
     12. device_settings_history — Threshold change history
         PK: id
         Fields: device_id, name (ltth/htth/ltdth/htdth/lbth/hdth),
         value, value_type (real/integer), start_time, end_time
+        ### Indexes
+        - (device_id)
+        - (device_id, name)
+        - (device_id, end_time)
+        - (device_id, start_time)
+        - (id) UNIQUE
 
     13. area_bounds (AB) — Geographic boundaries (populated by get_area_bounds tool)
         PK: id
@@ -192,12 +266,18 @@ function buildStaticPromptPrefix(isJourney: boolean = false): string {
     15. facility_sub_users — Facility↔sub-user mapping (for role_id=3 sub-users)
         PK: id
         Fields: user_id (FK→admin.user_id), facility_id (FK→facilities.facility_id)
+        ### Indexes
+        - (company_id)
+        - (facility_id)
+        - (user_id)
+        - (facility_id, user_id) UNIQUE
 
     16. light_data — Light sensor readings
         PK: id
         Fields: device_id, event_time, light (lux),
         imt_id (FK→incoming_message_history_k.sno)
-
+        ### Indexes
+        - (device_id, event_time) DESC
 
     ================================================================
     FACILITY ACCESS BY ROLE
@@ -391,6 +471,7 @@ function buildDynamicPromptSections(userId: string, roleInfo: UserRoleInfo | nul
 
   if (roleInfo) {
     prompt += `
+<<<<<<< HEAD
         FACILITY ACCESS (role_id=${roleInfo.roleId}):
         `;
             if (roleInfo.roleId === 1) {
@@ -407,6 +488,24 @@ function buildDynamicPromptSections(userId: string, roleInfo: UserRoleInfo | nul
           JOIN facility_sub_users fsu ON fsu.facility_id = f.facility_id AND fsu.user_id = ${roleInfo.adminUserId}
         - For direct facility queries: JOIN facility_sub_users fsu ON fsu.facility_id = f.facility_id WHERE fsu.user_id = ${roleInfo.adminUserId}
         `;
+=======
+FACILITY ACCESS (role_id=${roleInfo.roleId}):
+`;
+    if (roleInfo.roleId === 1) {
+      prompt += `- Super-admin: full access to all facilities. No facility filtering needed.\n`;
+    } else if (roleInfo.roleId === 2 && roleInfo.companyId != null) {
+      prompt += `- Company user: MUST filter facilities by company_id = ${roleInfo.companyId}
+      - Whenever the facilities table (f) appears in a query, add: f.company_id = ${roleInfo.companyId}
+      - For device_geofencings joins: LEFT JOIN facilities f ON f.facility_id = dg.facility_id AND f.company_id = ${roleInfo.companyId}
+      - For direct facility queries: WHERE f.company_id = ${roleInfo.companyId}
+      `;
+    } else if (roleInfo.roleId === 3 && roleInfo.adminUserId != null) {
+      prompt += `- Sub-user: MUST filter facilities via facility_sub_users table with user_id = ${roleInfo.adminUserId}
+      - Whenever the facilities table (f) appears in a query, add:
+        JOIN facility_sub_users fsu ON fsu.facility_id = f.facility_id AND fsu.user_id = ${roleInfo.adminUserId}
+      - For direct facility queries: JOIN facility_sub_users fsu ON fsu.facility_id = f.facility_id WHERE fsu.user_id = ${roleInfo.adminUserId}
+      `;
+>>>>>>> 6a1202e85e1f7ab72b22da4fa136adc5e6c36e94
     }
   }
 
