@@ -373,40 +373,40 @@ function buildDynamicPromptSections(userId: string, roleInfo: UserRoleInfo | nul
   if (isAdmin) {
     return `
 
-ADMIN MODE: The user_id for this request is: ${userId}. No user_id filtering required; query across all users. No facility filtering required. Do NOT ask the user for their user ID.
-`;
-  }
+    ADMIN MODE: The user_id for this request is: ${userId}. No user_id filtering required; query across all users. No facility filtering required. Do NOT ask the user for their user ID.
+    `;
+      }
 
-  let prompt = `
+      let prompt = `
 
-USER MODE: The user_id for this request is: ${userId}. Do NOT ask the user for their user ID.
-- ALWAYS filter by ud.user_id = '${userId}'
-- ALWAYS join user_device_assignment (ud) ON ud.device_id = other_table.device_id
-- Aggregations, GROUP BY, COUNT, SUM, etc. are ALLOWED for this user_id's data
-- Time ranges (days, months, years) are ALLOWED — adapt INTERVAL values as needed
-- Multiple visits, repeated facilities, patterns are ALLOWED for this user_id
-- ONLY refuse if query would access OTHER users' data (user_id != ${userId})
-- Never explain SQL/schema in answers
-`;
+    USER MODE: The user_id for this request is: ${userId}. Do NOT ask the user for their user ID.
+    - ALWAYS filter by ud.user_id = '${userId}'
+    - ALWAYS join user_device_assignment (ud) ON ud.device_id = other_table.device_id
+    - Aggregations, GROUP BY, COUNT, SUM, etc. are ALLOWED for this user_id's data
+    - Time ranges (days, months, years) are ALLOWED — adapt INTERVAL values as needed
+    - Multiple visits, repeated facilities, patterns are ALLOWED for this user_id
+    - ONLY refuse if query would access OTHER users' data (user_id != ${userId})
+    - Never explain SQL/schema in answers
+    `;
 
   if (roleInfo) {
     prompt += `
-FACILITY ACCESS (role_id=${roleInfo.roleId}):
-`;
-    if (roleInfo.roleId === 1) {
-      prompt += `- Super-admin: full access to all facilities. No facility filtering needed.\n`;
-    } else if (roleInfo.roleId === 2 && roleInfo.companyId != null) {
-      prompt += `- Company user: MUST filter facilities by company_id = ${roleInfo.companyId}
-- Whenever the facilities table (f) appears in a query, add: f.company_id = ${roleInfo.companyId}
-- For device_geofencings joins: LEFT JOIN facilities f ON f.facility_id = dg.facility_id AND f.company_id = ${roleInfo.companyId}
-- For direct facility queries: WHERE f.company_id = ${roleInfo.companyId}
-`;
-    } else if (roleInfo.roleId === 3 && roleInfo.adminUserId != null) {
-      prompt += `- Sub-user: MUST filter facilities via facility_sub_users table with user_id = ${roleInfo.adminUserId}
-- Whenever the facilities table (f) appears in a query, add:
-  JOIN facility_sub_users fsu ON fsu.facility_id = f.facility_id AND fsu.user_id = ${roleInfo.adminUserId}
-- For direct facility queries: JOIN facility_sub_users fsu ON fsu.facility_id = f.facility_id WHERE fsu.user_id = ${roleInfo.adminUserId}
-`;
+        FACILITY ACCESS (role_id=${roleInfo.roleId}):
+        `;
+            if (roleInfo.roleId === 1) {
+              prompt += `- Super-admin: full access to all facilities. No facility filtering needed.\n`;
+            } else if (roleInfo.roleId === 2 && roleInfo.companyId != null) {
+              prompt += `- Company user: MUST filter facilities by company_id = ${roleInfo.companyId}
+        - Whenever the facilities table (f) appears in a query, add: f.company_id = ${roleInfo.companyId}
+        - For device_geofencings joins: LEFT JOIN facilities f ON f.facility_id = dg.facility_id AND f.company_id = ${roleInfo.companyId}
+        - For direct facility queries: WHERE f.company_id = ${roleInfo.companyId}
+        `;
+            } else if (roleInfo.roleId === 3 && roleInfo.adminUserId != null) {
+              prompt += `- Sub-user: MUST filter facilities via facility_sub_users table with user_id = ${roleInfo.adminUserId}
+        - Whenever the facilities table (f) appears in a query, add:
+          JOIN facility_sub_users fsu ON fsu.facility_id = f.facility_id AND fsu.user_id = ${roleInfo.adminUserId}
+        - For direct facility queries: JOIN facility_sub_users fsu ON fsu.facility_id = f.facility_id WHERE fsu.user_id = ${roleInfo.adminUserId}
+        `;
     }
   }
 

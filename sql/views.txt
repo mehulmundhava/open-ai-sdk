@@ -81,23 +81,23 @@ FROM device_geofencings;
 
 COMMENT ON VIEW facility_arrival_departure_history IS 'Records of when devices entered or exited specific facilities. Does NOT contain GPS coordinates.';
 
--- 6. Infrastructure & Location Directory
-CREATE OR REPLACE VIEW facility_infrastructure_directory AS
-SELECT 
-    facility_id, 
-    facility_name, 
-    facility_type ,
-    latitude AS center_latitude, 
-    longitude AS center_longitude, 
-    street, 
-    city, 
-    state, 
-    zip_code,
-    company_id, 
-    is_active
-FROM facilities;
+-- -- 6. Infrastructure & Location Directory
+-- CREATE OR REPLACE VIEW facility_infrastructure_directory AS
+-- SELECT 
+--     facility_id, 
+--     facility_name, 
+--     facility_type ,
+--     latitude AS center_latitude, 
+--     longitude AS center_longitude, 
+--     street, 
+--     city, 
+--     state, 
+--     zip_code,
+--     company_id, 
+--     is_active
+-- FROM facilities;
 
-COMMENT ON VIEW facility_infrastructure_directory IS 'Master list of warehouses and facilities including their physical addresses and coordinates.';
+-- COMMENT ON VIEW facility_infrastructure_directory IS 'Master list of warehouses and facilities including their physical addresses and coordinates.';
 
 -- 7. Physical Impact Events
 CREATE OR REPLACE VIEW physical_impact_and_freefall_events AS
