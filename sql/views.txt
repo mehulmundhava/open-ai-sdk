@@ -1,0 +1,114 @@
+-- 1. Device Identity Master
+CREATE OR REPLACE VIEW device_registry_master AS
+SELECT 
+    device_id, 
+    device_name, 
+    imei AS imei_number, 
+    grai_id AS global_asset_id, 
+    imsi AS subscriber_id
+FROM device_details_table;
+
+COMMENT ON VIEW device_registry_master IS 'Master list of all hardware identifiers and device names. Use for identifying specific devices by IMEI or ID.';
+
+-- 2. Security & Access Mapping
+CREATE OR REPLACE VIEW authorized_device_mapping AS
+SELECT 
+    user_id, 
+    device_id
+FROM user_device_assignment;
+
+COMMENT ON VIEW authorized_device_mapping IS 'Security mapping between users and devices. ALWAYS join this to filter data by the current user_id.';
+
+-- 3. Real-Time Status Snapshot
+CREATE OR REPLACE VIEW current_device_telemetry_snapshot AS
+SELECT 
+    device_id, 
+    device_name, 
+    grai_id, 
+    imei,
+    latitude, 
+    longitude, 
+    h3_id AS hex_spatial_id,
+    location_type,
+    facility_id AS current_facility_id, 
+    facility_type AS current_site_type,
+    event_time AS last_location_update, 
+    updated_at AS last_data_reported_at,
+    temperature AS current_temperature, 
+    battery AS current_battery_level,
+    travel_distance AS total_distance_meters, 
+    dwell_time_seconds, 
+    dwell_time AS human_readable_dwell_duration,
+    shock_id AS latest_impact_event_id, 
+    shock_event_time AS latest_impact_timestamp,
+    free_fall_id AS latest_freefall_event_id, 
+    free_fall_event_time AS latest_freefall_timestamp
+FROM device_current_data;
+
+COMMENT ON VIEW current_device_telemetry_snapshot IS 'Latest known status, location, and vitals (temp/battery) for all devices.';
+
+-- 4. Historical Logs (Movement & Sensors)
+CREATE OR REPLACE VIEW historical_telemetry_and_location_logs AS
+SELECT 
+    device_id, 
+    event_time AS logged_at, 
+    timestamp AS server_received_at,
+    latitude, 
+    longitude, 
+    temperature AS recorded_temperature, 
+    battery AS recorded_battery,
+    facility_id,
+    facility_type,
+    dwell_time AS dwell_duration_text, 
+    dwell_timestamp AS dwell_duration_seconds,
+    travel_distance AS movement_distance_meters, 
+    accuracy AS gps_accuracy_meters, 
+    address AS location_address_details
+FROM incoming_message_history_k;
+
+COMMENT ON VIEW historical_telemetry_and_location_logs IS 'Historical log of location and sensor data. Use for route history, past temperatures, and movement reports.';
+
+-- 5. Geofence & Transit History
+CREATE OR REPLACE VIEW facility_arrival_departure_history AS
+SELECT 
+    device_id, 
+    facility_id, 
+    facility_type,
+    entry_event_time,
+    exit_event_time,
+    facility_last_event_time
+FROM device_geofencings;
+
+COMMENT ON VIEW facility_arrival_departure_history IS 'Records of when devices entered or exited specific facilities. Does NOT contain GPS coordinates.';
+
+-- 6. Infrastructure & Location Directory
+CREATE OR REPLACE VIEW facility_infrastructure_directory AS
+SELECT 
+    facility_id, 
+    facility_name, 
+    facility_type ,
+    latitude AS center_latitude, 
+    longitude AS center_longitude, 
+    street, 
+    city, 
+    state, 
+    zip_code,
+    company_id, 
+    is_active
+FROM facilities;
+
+COMMENT ON VIEW facility_infrastructure_directory IS 'Master list of warehouses and facilities including their physical addresses and coordinates.';
+
+-- 7. Physical Impact Events
+CREATE OR REPLACE VIEW physical_impact_and_freefall_events AS
+SELECT 
+    device_id, 
+    type AS event_category, -- 'shock' or 'free_fall'
+    time_stamp AS impact_occurrence_time,
+    latitude AS impact_latitude, 
+    longitude AS impact_longitude,
+    location_event_time AS gps_fix_time,
+    imt_k_id AS telemetry_log_reference_id
+FROM shock_info;
+
+COMMENT ON VIEW physical_impact_and_freefall_events IS 'Log of physical shocks and free-fall incidents. ALWAYS filter by event_category (shock or free_fall).';
