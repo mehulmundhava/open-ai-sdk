@@ -72,7 +72,7 @@ function buildStaticPromptPrefix(isJourney: boolean = false): string {
 
     TOOL SELECTION WORKFLOW:
     1. COUNT queries ("how many", "count of") → count_query
-    2. LIST queries ("list", "show", "get all") → list_query
+    2. LIST queries ("list", "show", "get all") → list_query (alias all SELECT columns to human-friendly headers with AS "Header Name")
     3. Other SQL queries → execute_db_query
     4. FACILITY Journey questions ("facility journey", "facility to facility") → facility_journey_list_tool or facility_journey_count_tool
     5. Complex multi-table logic (cross-referencing rows between tables) → custom_script_tool
@@ -85,7 +85,8 @@ function buildStaticPromptPrefix(isJourney: boolean = false): string {
     4. NEVER add LIMIT clause — tools handle pagination and CSV generation automatically.
     5. Never explain SQL/schema, table names, or column names in answers.
     6. On errors, say: "I'm unable to retrieve that information at the moment."
-    7. When querying shock_info for shock or free-fall alerts/counts/lists: ALWAYS add a type condition. Shock-only → AND type = 'shock'. Free-fall only → AND type = 'free_fall'. Both → AND type IN ('shock','free_fall').
+    7. When querying physical_impact_and_freefall_events for shock or free-fall alerts/counts/lists: ALWAYS add an event_category condition. Shock-only → AND event_category = 'shock'. Free-fall only → AND event_category = 'free_fall'. Both → AND event_category IN ('shock','free_fall').
+    8. For list_query or any report that returns rows to the user: ALWAYS alias SELECT columns to human-friendly, business-appropriate headers using double-quoted identifiers (e.g. SELECT device_id AS "Device ID", device_name AS "Device Name", last_location_update AS "Last Location Update"). Apply this to every column in the SELECT list so CSV and displayed results show readable headers.
 
     CLARIFICATION & CONFIRMATION:
     - If the user's question is ambiguous or could be interpreted in multiple ways, ASK the user for clarification before executing.
@@ -99,76 +100,68 @@ function buildStaticPromptPrefix(isJourney: boolean = false): string {
     - When a request is too large to handle, explain it as a process limit. Say something like: "I am unable to process the full list at once because there is a high volume of information. Please help me narrow down the search by providing a specific time range or location." Do NOT say things like "The query timed out due to data size."
 
     ================================================================
-    DATABASE TABLES & SCHEMA REFERENCE
+    DATABASE VIEWS & TABLES — SCHEMA REFERENCE
     ================================================================
 
-    PK=Primary Key, UK=Unique Key, FK=Foreign Key
+    PK=Primary Key, UK=Unique Key, FK=Foreign Key. Below: VIEWs (query using view name; underlying indexes apply) and TABLEs (query using table name). Use the correct identifier (view or table) for each.
 
-    1. device_details_table (D) — Device information metadata, identifiers
-       PK: sno | UK: device_id
-       Fields: device_id, device_name, imei, grai_id, iccid, imsi
-       ### Indexes
-       - (sno) UNIQUE
+    1. device_registry_master (D) — VIEW. Device information metadata, identifiers
+       Fields: device_id, device_name, imei_number, global_asset_id, subscriber_id
+       ### Indexes (underlying table; apply when querying this view)
        - (device_id) UNIQUE
 
-    2. user_device_assignment (UD) — User→device access mapping. ALWAYS join for user filtering.
-       PK: id
+    2. authorized_device_mapping (UD) — VIEW. User→device access mapping. ALWAYS join for user filtering.
        Fields: user_id (FK→admin.id), device_id (FK→*.device_id)
-       ### Indexes
+       ### Indexes (underlying table; apply when querying this view)
        - (device_id, user_id)
        - (user_id, device_id)
 
-    3. device_current_data (CD) — Current/latest device snapshot (location, sensors, alerts)
-       PK: id | UK: device_id
+    3. current_device_telemetry_snapshot (CD) — VIEW. Current/latest device snapshot (location, sensors, alerts)
        Fields: device_id, device_name, grai_id, imei,
-       latitude, longitude, h3_id, location_type,
-       facility_id (FK→facilities), facility_type (M/R/U/D),
-       event_time (last location), updated_at (last reported),
-       temperature (°C), battery (%),
-       travel_distance (meters), dwell_time_seconds (sec), dwell_time (human: "1D"/"2H"/"10M"),
-       shock_id (FK→shock_info.id), shock_event_time (use for "devices w/ shock after [date]" — avoid joining shock_info),
-       free_fall_id (FK→shock_info.id), free_fall_event_time (same for free-fall)
-       ### Indexes
-       - (facility_id)
+       latitude, longitude, hex_spatial_id, location_type,
+       current_facility_id (FK→facilities), current_site_type (M/R/U/D),
+       last_location_update (last location), last_data_reported_at (last reported),
+       current_temperature (°C), current_battery_level (%),
+       total_distance_meters, dwell_time_seconds, human_readable_dwell_duration ("1D"/"2H"/"10M"),
+       latest_impact_event_id (references shock events), latest_impact_timestamp (use for "devices w/ shock after [date]" — avoid joining physical_impact view),
+       latest_freefall_event_id, latest_freefall_timestamp (same for free-fall)
+       ### Indexes (underlying table; apply when querying this view)
+       - (current_facility_id)
        - (device_id) UNIQUE
-       - (id) UNIQUE
-       - (device_id, free_fall_event_time)
+       - (device_id, latest_freefall_timestamp)
        - (device_name)
        - (dwell_time_seconds)
-       - (event_time)
-       - (free_fall_event_time)
-       - (shock_event_time)
+       - (last_location_update)
+       - (latest_freefall_timestamp)
+       - (latest_impact_timestamp)
        - (longitude, latitude) -> GIS (GiST)
        - (device_id, longitude, latitude) -> GIS Composite (GiST)
-       - (device_id, shock_event_time)
-       - (device_id, facility_type)
-       - (device_id, facility_id)
-       - (device_id, event_time)
+       - (device_id, latest_impact_timestamp)
+       - (device_id, current_site_type)
+       - (device_id, current_facility_id)
+       - (device_id, last_location_update)
        - (device_id, dwell_time_seconds)
 
-    4. incoming_message_history_k (IK) — Historical device location/sensor log
-       PK: sno
-       Fields: device_id, event_time, timestamp (reported time),
-       latitude, longitude, temperature (°C), battery (%),
+    4. historical_telemetry_and_location_logs (IK) — VIEW. Historical device location/sensor log
+       Fields: device_id, logged_at, server_received_at,
+       latitude, longitude, recorded_temperature (°C), recorded_battery (%),
        facility_id (FK→facilities), facility_type,
-       dwell_time (human), dwell_timestamp (sec),
-       travel_distance (meters), accuracy (meters), altitude (meters), address (JSON)
-       ### Indexes
+       dwell_duration_text (human), dwell_duration_seconds (sec),
+       movement_distance_meters, gps_accuracy_meters, location_address_details (JSON)
+       ### Indexes (underlying table; apply when querying this view)
        - (longitude, latitude) -> GIS (GiST)
-       - (device_id, event_time, longitude, latitude) -> GIS Composite (GiST)
-       - (device_id, event_time) DESC
-       - (sno, event_time) DESC
+       - (device_id, logged_at, longitude, latitude) -> GIS Composite (GiST)
+       - (device_id, logged_at) DESC
 
-    5. device_geofencings (DG) — Facility entry/exit records. ⚠️ NO latitude/longitude columns.
-       PK: id
+    5. facility_arrival_departure_history (DG) — VIEW. Facility entry/exit records. ⚠️ NO latitude/longitude columns.
        Fields: device_id, facility_id (FK→facilities), facility_type,
        entry_event_time, exit_event_time, facility_last_event_time
-       ### Indexes
+       ### Indexes (underlying table; apply when querying this view)
        - (facility_type, entry_event_time, exit_event_time, device_id)
        - (device_id, facility_type, entry_event_time, exit_event_time, facility_last_event_time)
        - (device_id, facility_type, facility_last_event_time, entry_event_time)
 
-    6. facilities (F) — Facility/warehouse info with coordinates
+    6. facilities (F) — TABLE. Facility/warehouse info with coordinates
        PK: id | UK: facility_id
        Fields: facility_id, facility_name, facility_type (M/R/U/D),
        latitude, longitude, street, city, state, zip_code,
@@ -185,7 +178,7 @@ function buildStaticPromptPrefix(isJourney: boolean = false): string {
        - (facility_name)
        - (is_active)
 
-    7. sensor (S) — Temperature/battery sensor readings history
+    7. sensor (S) — TABLE. Temperature/battery sensor readings history
        PK: id | UK: imt_id (FK→incoming_message_history_k.sno)
        Fields: device_id, temperature (°C), battery (%), event_time
        ### Indexes
@@ -193,58 +186,49 @@ function buildStaticPromptPrefix(isJourney: boolean = false): string {
        - (event_time) DESC
        - (id) UNIQUE
 
-    8. shock_info — Full shock/free-fall event history (large table — avoid for simple "list devices w/ shock")
-       PK: id
-       Fields: device_id, type ('shock'|'free_fall'), time_stamp (event time),
-       latitude, longitude, location_event_time,
-       imt_k_id (FK→incoming_message_history_k.sno)
-       MANDATORY: When using this table, ALWAYS filter by type. "Shock alert/count/list" → AND si.type = 'shock'. "Free-fall" → AND si.type = 'free_fall'. Both → No need to filter by type.
-       ### Indexes
-       - (device_id, type, time_stamp) DESC
-       - (longitude, latitude) -> GIS (GiST)
-       - (device_id, longitude, latitude) -> GIS Composite (GiST)
+    8. physical_impact_and_freefall_events (si) — VIEW. Shock/free-fall event history (avoid for simple "list devices w/ shock")
+       Fields: device_id, event_category ('shock'|'free_fall'), impact_occurrence_time,
+       impact_latitude, impact_longitude, gps_fix_time, telemetry_log_reference_id
+       MANDATORY: When using this view, ALWAYS filter by event_category. "Shock alert/count/list" → AND si.event_category = 'shock'. "Free-fall" → AND si.event_category = 'free_fall'. Both → No need to filter by event_category.
+       ### Indexes (underlying table; apply when querying this view)
+       - (device_id, event_category, impact_occurrence_time) DESC
+       - (impact_longitude, impact_latitude) -> GIS (GiST)
+       - (device_id, impact_longitude, impact_latitude) -> GIS Composite (GiST)
 
-    9. device_temperature_alert — Temperature alert history with location
-       PK: id
-       Fields: device_id, start_time, end_time,
-       type (0=min temp, 1=max temp), threshold_value (°C trigger), threshold_duration (sec min duration to trigger),
-       status (0=inactive, 1=active — becomes 1 when temp outside threshold > threshold_duration),
-       latitude, longitude, location_event_time,
-       imt_k_id (FK→incoming_message_history_k.sno)
-       ### Indexes
-       - (device_id, end_time)
-       - (device_id, status)
+    9. temperature_incident_active_logs (dta) — VIEW. Temperature alert history with location
+       Fields: device_id, alert_started_at, alert_resolved_at,
+       alert_category (0=min temp, 1=max temp), trigger_temperature_celsius, required_duration_seconds,
+       is_currently_active (0=inactive, 1=active),
+       alert_location_latitude, alert_location_longitude, alert_gps_fix_time, telemetry_log_reference_id
+       ### Indexes (underlying table; apply when querying this view)
+       - (device_id, alert_resolved_at)
+       - (device_id, is_currently_active)
        - (device_id)
-       - (device_id, start_time, end_time) DESC
-       - (id) UNIQUE
-       - (start_time, end_time) DESC
-       - (longitude, latitude) -> GIS (GiST)
+       - (device_id, alert_started_at, alert_resolved_at) DESC
+       - (alert_started_at, alert_resolved_at) DESC
+       - (alert_location_longitude, alert_location_latitude) -> GIS (GiST)
 
-    10. device_alerts — Last alert per device (simplified view)
-        PK: id | UK: device_id
+    10. latest_device_alerts_summary (da) — VIEW. Last alert per device
         Fields: device_id,
-        min_temperature, min_temperature_event_time, min_temperature_sensor_id (FK→sensor.id),
-        max_temperature, max_temperature_event_time, max_temperature_sensor_id (FK→sensor.id),
-        battery, battery_event_time, battery_sensor_id (FK→sensor.id),
-        light, light_event_time, light_id (FK→light_data.id)
-        ### Indexes
-        - (device_id, battery_event_time)
-        - (device_id, max_temperature_event_time)
-        - (device_id, min_temperature_event_time)
-        - (battery_event_time)
-        - (max_temperature_event_time)
-        - (min_temperature_event_time)
+        lowest_recorded_temp, lowest_temp_at, highest_recorded_temp, highest_temp_at,
+        last_battery_reading, battery_recorded_at, light_lux_reading, light_recorded_at
+        ### Indexes (underlying table; apply when querying this view)
+        - (device_id, battery_recorded_at)
+        - (device_id, highest_temp_at)
+        - (device_id, lowest_temp_at)
+        - (battery_recorded_at)
+        - (highest_temp_at)
+        - (lowest_temp_at)
 
-    11. device_settings_data — Current device thresholds
-        PK: id | UK: device_id
+    11. device_threshold_settings (dts) — VIEW. Current device thresholds
         Fields: device_id,
-        ltth (low temp threshold °C), htth (high temp threshold °C),
-        ltdth (low temp duration sec), htdth (high temp duration sec),
-        lbth (low battery %), hdth (high dwell-time sec)
-        ### Indexes
+        low_temp_threshold (°C), high_temp_threshold (°C),
+        low_temp_duration_sec, high_temp_duration_sec,
+        low_battery_threshold_pct (%), high_dwell_time_threshold_sec
+        ### Indexes (underlying table; apply when querying this view)
         - (device_id) UNIQUE
 
-    12. device_settings_history — Threshold change history
+    12. device_settings_history — TABLE. Threshold change history
         PK: id
         Fields: device_id, name (ltth/htth/ltdth/htdth/lbth/hdth),
         value, value_type (real/integer), start_time, end_time
@@ -255,15 +239,15 @@ function buildStaticPromptPrefix(isJourney: boolean = false): string {
         - (device_id, start_time)
         - (id) UNIQUE
 
-    13. area_bounds (AB) — Geographic boundaries (populated by get_area_bounds tool)
+    13. area_bounds (AB) — TABLE. Geographic boundaries (populated by get_area_bounds tool)
         PK: id
         Fields: area_name, boundary (geometry — use with ST_Contains), location_params (jsonb)
 
-    14. admin — User accounts
+    14. admin — TABLE. User accounts
         PK: id | UK: user_id
         Fields: user_id, role_id (1=super-admin, 2=user, 3=sub-user), company_id
 
-    15. facility_sub_users — Facility↔sub-user mapping (for role_id=3 sub-users)
+    15. facility_sub_users — TABLE. Facility↔sub-user mapping (for role_id=3 sub-users)
         PK: id
         Fields: user_id (FK→admin.user_id), facility_id (FK→facilities.facility_id)
         ### Indexes
@@ -272,7 +256,7 @@ function buildStaticPromptPrefix(isJourney: boolean = false): string {
         - (user_id)
         - (facility_id, user_id) UNIQUE
 
-    16. light_data — Light sensor readings
+    16. light_data — TABLE. Light sensor readings
         PK: id
         Fields: device_id, event_time, light (lux),
         imt_id (FK→incoming_message_history_k.sno)
@@ -290,22 +274,22 @@ function buildStaticPromptPrefix(isJourney: boolean = false): string {
     - role_id=2 (company user): Filter by f.company_id = <company_id> (value provided in FACILITY ACCESS section).
     - role_id=3 (sub-user): JOIN facility_sub_users fsu ON fsu.facility_id = f.facility_id AND fsu.user_id = <admin_user_id> (value provided in FACILITY ACCESS section).
 
-    ⚠️ This filter is IN ADDITION TO user_device_assignment filtering on devices.
+    ⚠️ This filter is IN ADDITION TO authorized_device_mapping filtering on devices.
 
     ================================================================
     LATITUDE / LONGITUDE REFERENCE GUIDE
     ================================================================
 
-    CRITICAL: Different tables store lat/long with DIFFERENT meanings. Choose the correct one based on what the question asks:
+    CRITICAL: Different views and tables store lat/long with DIFFERENT meanings. Choose the correct one based on what the question asks. (Below: some are VIEWs, some are TABLEs — use the name shown.)
 
-    | Table                       | Lat/Long Fields               | What It Represents                                         | When To Use                                            |
-    |-----------------------------|-------------------------------|------------------------------------------------------------|--------------------------------------------------------|
-    | device_current_data (cd)    | cd.latitude, cd.longitude     | Device's CURRENT (last known) location                     | "devices currently in New York", "where is device X now" |
-    | incoming_message_history_k  | ik.latitude, ik.longitude     | Device's HISTORICAL location at event_time                 | "devices that traveled through USA last week", "route history" |
-    | facilities (f)              | f.latitude, f.longitude       | Fixed facility/warehouse location                          | ONLY for facility journeys (device_geofencings queries) |
-    | device_temperature_alert    | dta.latitude, dta.longitude   | Device location when temperature alert was active          | "where was device when temp alert occurred"             |
-    | shock_info                  | si.latitude, si.longitude     | Device location when shock/free-fall event occurred        | "where did shock happen", "free-fall event location"    |
-    | device_geofencings (dg)     | ⚠️ NO lat/long columns       | Must JOIN facilities table for coordinates                 | Never use dg.latitude or dg.longitude — they don't exist |
+    | View or Table                                     | Type  | Lat/Long Fields                                            | What It Represents                                         | When To Use                                            |
+    |----------------------------------------------------|-------|------------------------------------------------------------|------------------------------------------------------------|--------------------------------------------------------|
+    | current_device_telemetry_snapshot (cd)             | VIEW  | cd.latitude, cd.longitude                                  | Device's CURRENT (last known) location                     | "devices currently in New York", "where is device X now" |
+    | historical_telemetry_and_location_logs (ik)        | VIEW  | ik.latitude, ik.longitude                                  | Device's HISTORICAL location at logged_at                  | "devices that traveled through USA last week", "route history" |
+    | facilities (f)                                      | TABLE | f.latitude, f.longitude                                    | Fixed facility/warehouse location                          | ONLY for facility journeys (facility_arrival_departure_history) |
+    | temperature_incident_active_logs (dta)              | VIEW  | dta.alert_location_latitude, dta.alert_location_longitude | Device location when temperature alert was active          | "where was device when temp alert occurred"             |
+    | physical_impact_and_freefall_events (si)            | VIEW  | si.impact_latitude, si.impact_longitude                    | Device location when shock/free-fall event occurred        | "where did shock happen", "free-fall event location"    |
+    | facility_arrival_departure_history (dg)             | VIEW  | ⚠️ NO lat/long columns                                     | Must JOIN facilities TABLE for coordinates                 | Never use dg.latitude or dg.longitude — they don't exist |
 
     SPATIAL SEARCH RULES (polygon/area filtering — follow exactly for correct SQL):
     - Polygon filtering: When filtering by an area (e.g. area_bounds), always use ST_Contains(boundary_column, point_geometry). Example: ST_Contains(ab.boundary, <point_expression>).
@@ -313,11 +297,11 @@ function buildStaticPromptPrefix(isJourney: boolean = false): string {
     - Coordinate order: Inside ST_MakePoint use LONGITUDE first, then LATITUDE: ST_MakePoint(longitude, latitude). Example: ST_MakePoint(cd.longitude, cd.latitude).
 
     GEOGRAPHIC FILTERING EXAMPLES (all use the pattern above):
-    - "Devices currently in California" → ST_Contains(ab.boundary, ST_SetSRID(ST_MakePoint(cd.longitude, cd.latitude), 4326))
-    - "Devices that traveled through USA last week" → ST_Contains(ab.boundary, ST_SetSRID(ST_MakePoint(ik.longitude, ik.latitude), 4326)) AND ik.event_time >= NOW() - INTERVAL '7 days'
+    - "Devices currently in California" → ST_Contains(ab.boundary, ST_SetSRID(ST_MakePoint(cd.longitude, cd.latitude), 4326)) with current_device_telemetry_snapshot cd
+    - "Devices that traveled through USA last week" → ST_Contains(ab.boundary, ST_SetSRID(ST_MakePoint(ik.longitude, ik.latitude), 4326)) AND ik.logged_at >= NOW() - INTERVAL '7 days' with historical_telemetry_and_location_logs ik
     - "Facility journeys in New York" → ST_Contains(ab.boundary, ST_SetSRID(ST_MakePoint(f.longitude, f.latitude), 4326))
-    - "Temperature alerts in California" → ST_Contains(ab.boundary, ST_SetSRID(ST_MakePoint(dta.longitude, dta.latitude), 4326))
-    - "Shock events in Texas" → ST_Contains(ab.boundary, ST_SetSRID(ST_MakePoint(si.longitude, si.latitude), 4326))
+    - "Temperature alerts in California" → ST_Contains(ab.boundary, ST_SetSRID(ST_MakePoint(dta.alert_location_longitude, dta.alert_location_latitude), 4326)) with temperature_incident_active_logs dta
+    - "Shock events in Texas" → ST_Contains(ab.boundary, ST_SetSRID(ST_MakePoint(si.impact_longitude, si.impact_latitude), 4326)) with physical_impact_and_freefall_events si
 
     ================================================================
     JOURNEY vs FACILITY JOURNEY — CRITICAL DIFFERENCE
@@ -328,35 +312,35 @@ function buildStaticPromptPrefix(isJourney: boolean = false): string {
     1. REGULAR JOURNEY / TRAVEL / MOVEMENT (general device movement):
        - Questions like: "list journeys in New York", "devices that traveled through USA", "movement history"
        - Uses device's OWN location data:
-         * device_current_data (cd.latitude, cd.longitude) → for current/latest location
-         * incoming_message_history_k (ik.latitude, ik.longitude) → for historical movement over time
+         * current_device_telemetry_snapshot (cd.latitude, cd.longitude) → for current/latest location
+         * historical_telemetry_and_location_logs (ik.latitude, ik.longitude) → for historical movement over time
        - Use SQL tools: count_query, list_query, execute_db_query
        - Example: "devices that traveled in USA last week" →
-         SELECT DISTINCT ik.device_id FROM incoming_message_history_k ik
-         JOIN user_device_assignment ud ON ud.device_id = ik.device_id
+         SELECT DISTINCT ik.device_id FROM historical_telemetry_and_location_logs ik
+         JOIN authorized_device_mapping ud ON ud.device_id = ik.device_id
          JOIN area_bounds ab ON ab.id = <area_bound_id>
          WHERE ud.user_id = '<user_id>'
-         AND ik.event_time >= NOW() - INTERVAL '7 days'
+         AND ik.logged_at >= NOW() - INTERVAL '7 days'
          AND ST_Contains(ab.boundary, ST_SetSRID(ST_MakePoint(ik.longitude, ik.latitude), 4326))
 
     2. FACILITY JOURNEY (movement between registered facilities):
        - Questions MUST explicitly mention "facility journey", "facility to facility", "facility movement", "facility transition"
-       - Uses device_geofencings table joined with facilities table for coordinates
+       - Uses facility_arrival_departure_history view joined with facilities table for coordinates
        - Uses SPECIALIZED tools ONLY: facility_journey_list_tool or facility_journey_count_tool
        - These tools fetch raw geofencing rows and run a journey calculation algorithm in TypeScript
        - Facility journey = device movement from one facility_id to another, with >= 4 hours between
-       - device_geofencings has NO lat/long — MUST JOIN facilities (f.latitude, f.longitude)
+       - facility_arrival_departure_history has NO lat/long — MUST JOIN facilities (f.latitude, f.longitude)
        - SQL template for these tools:
          SELECT dg.device_id, dg.facility_id, dg.facility_type, f.facility_name, dg.entry_event_time, dg.exit_event_time
-         FROM device_geofencings dg
-         JOIN user_device_assignment uda ON uda.device_id = dg.device_id
+         FROM facility_arrival_departure_history dg
+         JOIN authorized_device_mapping uda ON uda.device_id = dg.device_id
          LEFT JOIN facilities f ON dg.facility_id = f.facility_id
          WHERE uda.user_id = '<user_id>' [filters]
          ORDER BY dg.entry_event_time ASC
        - For geographic filter on facility journeys: JOIN area_bounds ab ON ab.id = <id> WHERE ST_Contains(ab.boundary, ST_SetSRID(ST_MakePoint(f.longitude, f.latitude), 4326))
        - For same facility (A→A), minimum time is 4 hours + extraJourneyTimeLimit (if provided)
 
-    IMPORTANT: Do NOT use facility_journey_list_tool or facility_journey_count_tool unless the user explicitly asks about FACILITY journeys. Regular journey/travel questions use standard SQL tools with device_current_data or incoming_message_history_k.
+    IMPORTANT: Do NOT use facility_journey_list_tool or facility_journey_count_tool unless the user explicitly asks about FACILITY journeys. Regular journey/travel questions use standard SQL tools with current_device_telemetry_snapshot or historical_telemetry_and_location_logs.
 
     IF UNSURE: When a journey question is ambiguous (e.g., "show journeys in New York"), ASK the user:
     "Do you mean:
@@ -369,13 +353,13 @@ function buildStaticPromptPrefix(isJourney: boolean = false): string {
     ================================================================
 
     For "devices that reported X alert in last N period":
-    - MUST join an alert table AND filter by time window
-    - High temp alert = type 1 / max_temperature_event_time. Low temp alert = type 0 / min_temperature_event_time.
+    - MUST join an alert view AND filter by time window
+    - High temp alert = alert_category 1 / highest_temp_at. Low temp alert = alert_category 0 / lowest_temp_at.
     - Two approaches:
-      (1) device_alerts (simpler, last alert only): JOIN device_alerts da ON da.device_id = cd.device_id WHERE da.max_temperature_event_time >= NOW() - INTERVAL '1 day'
-      (2) device_temperature_alert (accurate, any overlap): WHERE dta.type = 1 AND dta.start_time <= window_end AND (dta.end_time >= window_start OR dta.end_time IS NULL) AND dta.status = 1
-    - device_temperature_alert has latitude, longitude = device location during the alert period
-    - shock_info has latitude, longitude = device location when shock/free-fall occurred, filter by type ('shock' or 'free_fall')
+      (1) latest_device_alerts_summary (simpler, last alert only): JOIN latest_device_alerts_summary da ON da.device_id = cd.device_id WHERE da.highest_temp_at >= NOW() - INTERVAL '1 day'
+      (2) temperature_incident_active_logs (accurate, any overlap): WHERE dta.alert_category = 1 AND dta.alert_started_at <= window_end AND (dta.alert_resolved_at >= window_start OR dta.alert_resolved_at IS NULL) AND dta.is_currently_active = 1
+    - temperature_incident_active_logs has alert_location_latitude, alert_location_longitude = device location during the alert period
+    - physical_impact_and_freefall_events has impact_latitude, impact_longitude = device location when shock/free-fall occurred, filter by event_category ('shock' or 'free_fall')
 
     ================================================================
     GEOGRAPHIC BOUNDARY TOOL (get_area_bounds)
@@ -396,9 +380,10 @@ function buildStaticPromptPrefix(isJourney: boolean = false): string {
     SQL BEST PRACTICES
     ================================================================
 
-    - Always filter by user_id via user_device_assignment unless admin
-    - JOIN: user_device_assignment ud ON ud.device_id = other_table.device_id
+    - Always filter by user_id via authorized_device_mapping unless admin
+    - JOIN: authorized_device_mapping ud ON ud.device_id = other_table.device_id
     - SELECT only needed columns, never SELECT *
+    - For list_query and reports: alias every column with AS "Human-Friendly Header" (e.g. device_id AS "Device ID") so results and CSV exports have readable column names
     - Temperature in Celsius (°C), dwell time in seconds (86400 = 1 day)
     - Facility types: M (manufacturer), R (retailer), U, D, etc.
     - Use the schema reference above to construct queries — adapt JOINs, filters, and aggregations to match the user's intent
@@ -417,13 +402,13 @@ function buildStaticPromptPrefix(isJourney: boolean = false): string {
 
     2. SCHEMA DBA — Does every identifier match the schema above exactly?
        - All table names, column names, and data types verified against schema?
-       - FK relationships joined correctly (e.g., ud.device_id = cd.device_id)?
+       - FK relationships joined correctly (e.g., ud.device_id = cd.device_id for authorized_device_mapping and current_device_telemetry_snapshot)?
        - No invented columns or wrong aliases?
 
     3. PERFORMANCE ENGINEER — Will this query run safely?
        - No SELECT *, no Cartesian products, no missing user_id filter?
-       - Large tables (shock_info, incoming_message_history_k) filtered by time range or device_id?
-       - Avoid joining shock_info for simple "list devices with shock" — use device_current_data.shock_event_time instead?
+       - Large views (physical_impact_and_freefall_events, historical_telemetry_and_location_logs) filtered by time range or device_id?
+       - Avoid joining physical_impact_and_freefall_events for simple "list devices with shock" — use current_device_telemetry_snapshot.latest_impact_timestamp (or latest_freefall_timestamp) instead?
 
     DECISION: If any check fails → fix the query before executing. Never execute a query that fails any check.
     If all checks pass → execute immediately with the appropriate tool.
@@ -461,7 +446,7 @@ function buildDynamicPromptSections(userId: string, roleInfo: UserRoleInfo | nul
 
     USER MODE: The user_id for this request is: ${userId}. Do NOT ask the user for their user ID.
     - ALWAYS filter by ud.user_id = '${userId}'
-    - ALWAYS join user_device_assignment (ud) ON ud.device_id = other_table.device_id
+    - ALWAYS join authorized_device_mapping (ud) ON ud.device_id = other_table.device_id
     - Aggregations, GROUP BY, COUNT, SUM, etc. are ALLOWED for this user_id's data
     - Time ranges (days, months, years) are ALLOWED — adapt INTERVAL values as needed
     - Multiple visits, repeated facilities, patterns are ALLOWED for this user_id
@@ -478,7 +463,7 @@ function buildDynamicPromptSections(userId: string, roleInfo: UserRoleInfo | nul
             } else if (roleInfo.roleId === 2 && roleInfo.companyId != null) {
               prompt += `- Company user: MUST filter facilities by company_id = ${roleInfo.companyId}
         - Whenever the facilities table (f) appears in a query, add: f.company_id = ${roleInfo.companyId}
-        - For device_geofencings joins: LEFT JOIN facilities f ON f.facility_id = dg.facility_id AND f.company_id = ${roleInfo.companyId}
+        - For facility_arrival_departure_history joins: LEFT JOIN facilities f ON f.facility_id = dg.facility_id AND f.company_id = ${roleInfo.companyId}
         - For direct facility queries: WHERE f.company_id = ${roleInfo.companyId}
         `;
             } else if (roleInfo.roleId === 3 && roleInfo.adminUserId != null) {

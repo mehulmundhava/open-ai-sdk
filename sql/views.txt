@@ -112,3 +112,38 @@ SELECT
 FROM shock_info;
 
 COMMENT ON VIEW physical_impact_and_freefall_events IS 'Log of physical shocks and free-fall incidents. ALWAYS filter by event_category (shock or free_fall).';
+
+-- 8. Temperature Incident Logs (Base: device_temperature_alert)
+CREATE OR REPLACE VIEW temperature_incident_active_logs AS
+SELECT 
+    device_id, start_time AS alert_started_at, end_time AS alert_resolved_at,
+    type AS alert_category, threshold_value AS trigger_temperature_celsius, 
+    threshold_duration AS required_duration_seconds, status AS is_currently_active,
+    latitude AS alert_location_latitude, longitude AS alert_location_longitude,
+    location_event_time AS alert_gps_fix_time, imt_k_id AS telemetry_log_reference_id
+FROM device_temperature_alert;
+
+COMMENT ON VIEW temperature_incident_active_logs IS 'History of temperature threshold violations (Min/Max). Includes location and duration of the incident.';
+
+-- 9. Latest Alerts Summary (Base: device_alerts)
+CREATE OR REPLACE VIEW latest_device_alerts_summary AS
+SELECT 
+    device_id,
+    min_temperature AS lowest_recorded_temp, min_temperature_event_time AS lowest_temp_at,
+    max_temperature AS highest_recorded_temp, max_temperature_event_time AS highest_temp_at,
+    battery AS last_battery_reading, battery_event_time AS battery_recorded_at,
+    light AS light_lux_reading, light_event_time AS light_recorded_at
+FROM device_alerts;
+
+COMMENT ON VIEW latest_device_alerts_summary IS 'Summary of the most extreme readings (min/max temp, light, battery) for each device.';
+
+-- 10. Device Configuration Settings (Base: device_settings_data)
+CREATE OR REPLACE VIEW device_threshold_settings AS
+SELECT 
+    device_id,
+    ltth AS low_temp_threshold, htth AS high_temp_threshold,
+    ltdth AS low_temp_duration_sec, htdth AS high_temp_duration_sec,
+    lbth AS low_battery_threshold_pct, hdth AS high_dwell_time_threshold_sec
+FROM device_settings_data;
+
+COMMENT ON VIEW device_threshold_settings IS 'Current configuration for alerts. Use to check what temperature or battery limits are set for a device.';
