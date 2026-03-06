@@ -169,7 +169,7 @@ export async function processChat(
 
     // Chain of thought: (1) extract last bunch from history (from end until role:'user')
     const lastBunchMessages = getLastBunchFromHistory(result.history);
-    requestLogger.info('💬 LAST BUNCH MESSAGES', {
+    requestLogger.fileOnly.info('💬 LAST BUNCH MESSAGES', {
       lastBunchMessages,
     });
     // (2) from last-bunch messages sub-array, extract last SQL query

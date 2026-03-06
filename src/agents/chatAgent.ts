@@ -41,7 +41,7 @@ async function getUserRoleInfo(userId: string): Promise<UserRoleInfo | null> {
     return {
       roleId: rows[0].role_id,
       companyId: rows[0].company_id ?? null,
-      adminUserId: rows[0].user_id ?? null,
+      adminUserId: rows[0].id ?? null,
     };
   } catch (error) {
     logger.warn(`Failed to fetch role info for userId ${userId}: ${error}`);
@@ -272,7 +272,7 @@ function buildStaticPromptPrefix(isJourney: boolean = false): string {
 
     - role_id=1 (super-admin): No facility filtering.
     - role_id=2 (company user): Filter by f.company_id = <company_id> (value provided in FACILITY ACCESS section).
-    - role_id=3 (sub-user): JOIN facility_sub_users fsu ON fsu.facility_id = f.facility_id AND fsu.user_id = <admin_user_id> (value provided in FACILITY ACCESS section).
+    - role_id=3 (sub-user): Use facility_sub_users (fsu) as the middle table. When joining facility info to another table (cd, dg): put user_id in the JOIN condition (LEFT JOIN fsu ... AND fsu.user_id = <admin_user_id>). When querying facilities directly: put user_id in WHERE (WHERE fsu.user_id = <admin_user_id>). See dynamic FACILITY ACCESS section for exact patterns.
 
     ⚠️ This filter is IN ADDITION TO authorized_device_mapping filtering on devices.
 
@@ -458,19 +458,29 @@ function buildDynamicPromptSections(userId: string, roleInfo: UserRoleInfo | nul
     prompt += `
         FACILITY ACCESS (role_id=${roleInfo.roleId}):
         `;
-            if (roleInfo.roleId === 1) {
+            if (roleInfo.roleId == 1) {
               prompt += `- Super-admin: full access to all facilities. No facility filtering needed.\n`;
-            } else if (roleInfo.roleId === 2 && roleInfo.companyId != null) {
+            } else if (roleInfo.roleId == 2 && roleInfo.companyId != null) {
               prompt += `- Company user: MUST filter facilities by company_id = ${roleInfo.companyId}
         - Whenever the facilities table (f) appears in a query, add: f.company_id = ${roleInfo.companyId}
         - For facility_arrival_departure_history joins: LEFT JOIN facilities f ON f.facility_id = dg.facility_id AND f.company_id = ${roleInfo.companyId}
         - For direct facility queries: WHERE f.company_id = ${roleInfo.companyId}
         `;
-            } else if (roleInfo.roleId === 3 && roleInfo.adminUserId != null) {
-              prompt += `- Sub-user: MUST filter facilities via facility_sub_users table with user_id = ${roleInfo.adminUserId}
-        - Whenever the facilities table (f) appears in a query, add:
-          JOIN facility_sub_users fsu ON fsu.facility_id = f.facility_id AND fsu.user_id = ${roleInfo.adminUserId}
-        - For direct facility queries: JOIN facility_sub_users fsu ON fsu.facility_id = f.facility_id WHERE fsu.user_id = ${roleInfo.adminUserId}
+            } else if (roleInfo.roleId == 3 && roleInfo.adminUserId != null) {
+              prompt += `- Sub-user: You MUST use facility_sub_users (fsu) as the MIDDLE table whenever the facilities table (f) is used. Use user_id = ${roleInfo.adminUserId} in JOIN when attaching facility info to other data; use it in WHERE when the query is about facilities themselves.
+
+        WHEN TO PUT user_id = ${roleInfo.adminUserId} IN THE JOIN CONDITION:
+        - You are joining facility data TO another table (e.g. current_device_telemetry_snapshot, facility_arrival_departure_history). The main rows (devices/journeys) belong to the user; the facility_id on that row may or may not belong to the sub-user. Use LEFT JOIN and put fsu.user_id = ${roleInfo.adminUserId} in the JOIN condition so facility columns are filled only when that facility is in the user's list; device rows still appear even if current facility is not in the list.
+        - Example (asset list with facility data): LEFT JOIN facility_sub_users fsu ON fsu.facility_id = cd.current_facility_id AND fsu.user_id = ${roleInfo.adminUserId} then LEFT JOIN facilities f ON f.facility_id = fsu.facility_id.
+
+        WHEN TO PUT user_id = ${roleInfo.adminUserId} IN THE WHERE CLAUSE:
+        - The user is asking for data directly FROM facilities (e.g. "list my facilities", "facilities in Canada"). Facilities table is the main subject. Use JOIN facility_sub_users fsu ON fsu.facility_id = f.facility_id and add WHERE fsu.user_id = ${roleInfo.adminUserId} so only facilities assigned to this sub-user are returned.
+
+        CONCRETE PATTERNS:
+        - current_device_telemetry_snapshot (cd) + facility columns: LEFT JOIN facility_sub_users fsu ON fsu.facility_id = cd.current_facility_id AND fsu.user_id = ${roleInfo.adminUserId} ; LEFT JOIN facilities f ON f.facility_id = fsu.facility_id (user_id in JOIN).
+        - facility_arrival_departure_history (dg) + facility columns: LEFT JOIN facility_sub_users fsu ON fsu.facility_id = dg.facility_id AND fsu.user_id = ${roleInfo.adminUserId} ; LEFT JOIN facilities f ON f.facility_id = fsu.facility_id (user_id in JOIN).
+        - Direct facility list/query: FROM facilities f JOIN facility_sub_users fsu ON fsu.facility_id = f.facility_id WHERE fsu.user_id = ${roleInfo.adminUserId} (user_id in WHERE).
+        - WRONG for role_id=3: "LEFT JOIN facilities f ON f.facility_id = cd.current_facility_id" (missing facility_sub_users).
         `;
     }
   }
@@ -581,6 +591,10 @@ export async function runChatAgent(
     const { staticPrefix, dynamicSections } = buildSystemPrompt(userId, isJourney, roleInfo);
 
     const finalSystemPrompt = staticPrefix + dynamicSections;
+
+    console.log('----------> finalSystemPrompt:',roleInfo, finalSystemPrompt);
+
+
 
     const modelName = await getAiModelName();
     const client = new OpenAI({ apiKey: settings.openaiApiKey });
