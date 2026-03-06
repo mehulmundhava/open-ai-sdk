@@ -167,6 +167,7 @@ function buildStaticPromptPrefix(isJourney: boolean = false): string {
        Fields: facility_id, facility_name, facility_type (M/R/U/D),
        latitude, longitude, street, city, state, zip_code,
        company_id (FK→admin.company_id for role_id=2), is_active (0=inactive, 1=active)
+       ⚠️ No "country" column. Do NOT use f.country. For "devices/assets in [country or region]" use get_area_bounds and filter by device coordinates (cd.latitude, cd.longitude) with ST_Contains — see "DEVICES/ASSETS IN A REGION" below.
        ### Indexes
        - (facility_type)
        - (company_id)
@@ -304,6 +305,12 @@ function buildStaticPromptPrefix(isJourney: boolean = false): string {
     - "Temperature alerts in California" → ST_Contains(ab.boundary, ST_SetSRID(ST_MakePoint(dta.alert_location_longitude, dta.alert_location_latitude), 4326)) with temperature_incident_active_logs dta
     - "Shock events in Texas" → ST_Contains(ab.boundary, ST_SetSRID(ST_MakePoint(si.impact_longitude, si.impact_latitude), 4326)) with physical_impact_and_freefall_events si
 
+    DEVICES/ASSETS IN A COUNTRY OR REGION (e.g. "asset list in Canada", "devices in California"):
+    - The question asks where the DEVICE is located (current or historical), not where a facility is. Filter by device location only.
+    - The facilities table has NO "country" column. Never use f.country or any facility column to filter by country/region.
+    - Correct approach: (1) Call get_area_bounds with the region (e.g. country: "Canada" for "in Canada", or country: "United States", state: "California" for "in California"). (2) In SQL: JOIN area_bounds ab ON ab.id = <area_bound_id>. (3) Filter by device coordinates: for current snapshot use ST_Contains(ab.boundary, ST_SetSRID(ST_MakePoint(cd.longitude, cd.latitude), 4326)) with current_device_telemetry_snapshot cd. (4) If the question also asks for "facility data", keep your JOIN to facilities (f) for facility columns only — do not add any region filter on f; the region filter is only on cd (device location).
+    - Example: "asset list in Canada with facility data" → get_area_bounds({ country: "Canada" }), then FROM current_device_telemetry_snapshot cd JOIN authorized_device_mapping ud ... LEFT JOIN facilities f ON ... JOIN area_bounds ab ON ab.id = <id> WHERE ud.user_id = ... AND ST_Contains(ab.boundary, ST_SetSRID(ST_MakePoint(cd.longitude, cd.latitude), 4326)).
+
     ================================================================
     JOURNEY vs FACILITY JOURNEY — CRITICAL DIFFERENCE
     ================================================================
@@ -368,12 +375,12 @@ function buildStaticPromptPrefix(isJourney: boolean = false): string {
 
     The tool returns a boundary only when the API returns Polygon/MultiPolygon (regions). Passing wrong parameters (e.g. country "/" or state without country) can return a Point (address) and the tool will FAIL. Always pass parameters that request a region:
 
-    - Countries: { country: "United States" } or { country: "Mexico" }. Use full country name. Do NOT use "/" or empty.
+    - Countries: { country: "United States" }, { country: "Canada" }, { country: "Mexico" }. Use full country name. Do NOT use "/" or empty.
     - US States (California, Texas, New York, etc.): ALWAYS pass BOTH: { country: "United States", state: "California" }. Never pass only state or country: "/" — that can return a Point and fail.
     - Cities: { country: "United States", city: "Los Angeles" } or { state: "New York", city: "New York" } when ambiguous.
     - Combine for states: { country: "United States", state: "California" }. Fallback only when no region fits: { q: "location name" }.
 
-    Examples that work: "in California" → { country: "United States", state: "California" }; "in USA" → { country: "United States" }. Wrong: { country: "/", state: "California" } or { state: "California" } without country.
+    Examples that work: "in Canada" → { country: "Canada" }; "in California" → { country: "United States", state: "California" }; "in USA" → { country: "United States" }. Wrong: { country: "/", state: "California" } or { state: "California" } without country.
 
     Returns: { success, area_bound_id, area_name }. In SQL use spatial rules: JOIN area_bounds ab ON ab.id = <area_bound_id> AND ST_Contains(ab.boundary, ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)) — longitude first, latitude second. Never paste POLYGON/MULTIPOLYGON text into queries.
 
