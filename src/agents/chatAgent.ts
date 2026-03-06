@@ -98,6 +98,7 @@ function buildStaticPromptPrefix(isJourney: boolean = false): string {
     - Never use technical jargon in your reasoning or answers. Do NOT use: "query", "database", "table", "SQL", "server", "data slice".
     - Use business-friendly language instead: "process", "report", "lookup", "search", "details", "information", or "request".
     - When a request is too large to handle, explain it as a process limit. Say something like: "I am unable to process the full list at once because there is a high volume of information. Please help me narrow down the search by providing a specific time range or location." Do NOT say things like "The query timed out due to data size."
+    - If you decide not to run a request for performance reasons (e.g. it would scan too much data), use the same style: say you cannot process that broad request and suggest narrowing by time range, location, or scope — without mentioning queries, timeouts, or database.
 
     ================================================================
     DATABASE VIEWS & TABLES — SCHEMA REFERENCE
@@ -271,7 +272,7 @@ function buildStaticPromptPrefix(isJourney: boolean = false): string {
     Apply this filter whenever the facilities table appears in ANY query (direct queries, JOINs, subqueries, facility journeys).
 
     - role_id=1 (super-admin): No facility filtering.
-    - role_id=2 (company user): Filter by f.company_id = <company_id> (value provided in FACILITY ACCESS section).
+    - role_id=2 (company user): When joining facility info to another table (cd, dg): put f.company_id = <company_id> in the JOIN condition. When querying facilities directly: put it in WHERE. See dynamic FACILITY ACCESS section for exact patterns.
     - role_id=3 (sub-user): Use facility_sub_users (fsu) as the middle table. When joining facility info to another table (cd, dg): put user_id in the JOIN condition (LEFT JOIN fsu ... AND fsu.user_id = <admin_user_id>). When querying facilities directly: put user_id in WHERE (WHERE fsu.user_id = <admin_user_id>). See dynamic FACILITY ACCESS section for exact patterns.
 
     ⚠️ This filter is IN ADDITION TO authorized_device_mapping filtering on devices.
@@ -405,13 +406,15 @@ function buildStaticPromptPrefix(isJourney: boolean = false): string {
        - FK relationships joined correctly (e.g., ud.device_id = cd.device_id for authorized_device_mapping and current_device_telemetry_snapshot)?
        - No invented columns or wrong aliases?
 
-    3. PERFORMANCE ENGINEER — Will this query run safely?
-       - No SELECT *, no Cartesian products, no missing user_id filter?
-       - Large views (physical_impact_and_freefall_events, historical_telemetry_and_location_logs) filtered by time range or device_id?
-       - Avoid joining physical_impact_and_freefall_events for simple "list devices with shock" — use current_device_telemetry_snapshot.latest_impact_timestamp (or latest_freefall_timestamp) instead?
+    3. PERFORMANCE ENGINEER — Will this query run safely? Act as a query performance analyst.
+       - High-volume objects (treat as heavy; require strong filters): historical_telemetry_and_location_logs, facility_arrival_departure_history, physical_impact_and_freefall_events, sensor table. Any query that references these must have bounded scope.
+       - Required safeguards: no SELECT *, no Cartesian products, no missing user_id/authorized_device_mapping filter.
+       - For the high-volume objects above: there must be a restrictive time filter (e.g. logged_at / event_time / entry_event_time within a defined window). Prefer time windows of 15 days or less for historical_telemetry_and_location_logs and facility_arrival_departure_history; avoid unbounded or "all time" scans. For physical_impact_and_freefall_events, prefer current_device_telemetry_snapshot.latest_impact_timestamp (or latest_freefall_timestamp) when the question is only "devices with shock/free-fall" rather than full event history.
+       - Complexity: if the query uses multiple nested subqueries or multiple heavy views together without clear filters, treat it as high load.
+       - If the query would be high load (uses heavy objects + missing or very wide time filter, or overly complex) and the user's question cannot be satisfied by adding a reasonable filter (e.g. they asked for "all history" or "everything"): do NOT execute the query. Instead, respond in natural language: politely say you cannot run such a broad request for performance reasons, and suggest narrowing (e.g. a specific time range like the last 7–14 days, a location, or a smaller set of devices). Use the same friendly tone as for other process limits (see TONE & RESPONSE STYLE).
+       - If the query can be made safe by adding a time window or narrowing scope, fix it first; only then execute.
 
-    DECISION: If any check fails → fix the query before executing. Never execute a query that fails any check.
-    If all checks pass → execute immediately with the appropriate tool.
+    DECISION: If logic or schema check fails → fix the query before executing. If performance check fails and the request cannot be safely narrowed by you → do not run the query; respond to the user with a helpful message and suggest narrowing the request. If all checks pass (or you fixed the query) → execute with the appropriate tool.
 
     ================================================================
     CUSTOM SCRIPT TOOL (custom_script_tool)
@@ -461,10 +464,19 @@ function buildDynamicPromptSections(userId: string, roleInfo: UserRoleInfo | nul
             if (roleInfo.roleId == 1) {
               prompt += `- Super-admin: full access to all facilities. No facility filtering needed.\n`;
             } else if (roleInfo.roleId == 2 && roleInfo.companyId != null) {
-              prompt += `- Company user: MUST filter facilities by company_id = ${roleInfo.companyId}
-        - Whenever the facilities table (f) appears in a query, add: f.company_id = ${roleInfo.companyId}
-        - For facility_arrival_departure_history joins: LEFT JOIN facilities f ON f.facility_id = dg.facility_id AND f.company_id = ${roleInfo.companyId}
-        - For direct facility queries: WHERE f.company_id = ${roleInfo.companyId}
+              prompt += `- Company user: MUST filter facilities by company_id = ${roleInfo.companyId}. Use company_id in JOIN when attaching facility info to other data; use it in WHERE when the query is about facilities themselves.
+
+        WHEN TO PUT f.company_id = ${roleInfo.companyId} IN THE JOIN CONDITION:
+        - You are joining facility data TO another table (e.g. current_device_telemetry_snapshot, facility_arrival_departure_history). The main rows (devices/journeys) belong to the user; the facility_id on that row may or may not belong to this company. Use LEFT JOIN and put f.company_id = ${roleInfo.companyId} in the JOIN condition so facility columns are filled only when that facility belongs to the company; device rows still appear even if current facility is not.
+        - Example (asset list with facility data): LEFT JOIN facilities f ON f.facility_id = cd.current_facility_id AND f.company_id = ${roleInfo.companyId}.
+
+        WHEN TO PUT f.company_id = ${roleInfo.companyId} IN THE WHERE CLAUSE:
+        - The user is asking for data directly FROM facilities (e.g. "list my facilities", "facilities in Canada"). Facilities table is the main subject. Use WHERE f.company_id = ${roleInfo.companyId} so only this company's facilities are returned.
+
+        CONCRETE PATTERNS:
+        - current_device_telemetry_snapshot (cd) + facility columns: LEFT JOIN facilities f ON f.facility_id = cd.current_facility_id AND f.company_id = ${roleInfo.companyId} (company_id in JOIN).
+        - facility_arrival_departure_history (dg) + facility columns: LEFT JOIN facilities f ON f.facility_id = dg.facility_id AND f.company_id = ${roleInfo.companyId} (company_id in JOIN).
+        - Direct facility list/query: FROM facilities f WHERE f.company_id = ${roleInfo.companyId} (company_id in WHERE).
         `;
             } else if (roleInfo.roleId == 3 && roleInfo.adminUserId != null) {
               prompt += `- Sub-user: You MUST use facility_sub_users (fsu) as the MIDDLE table whenever the facilities table (f) is used. Use user_id = ${roleInfo.adminUserId} in JOIN when attaching facility info to other data; use it in WHERE when the query is about facilities themselves.
@@ -592,7 +604,7 @@ export async function runChatAgent(
 
     const finalSystemPrompt = staticPrefix + dynamicSections;
 
-    console.log('----------> finalSystemPrompt:',roleInfo, finalSystemPrompt);
+    // console.log('----------> finalSystemPrompt:',roleInfo, finalSystemPrompt);
 
 
 
